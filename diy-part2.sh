@@ -9,6 +9,7 @@
 #   2) image/Makefile 的 Device 定义
 #   3) 02_network 的 swconfig 端口映射
 #   4) 11-ath11k-caldata 的 ART 校准提取
+#   5~7) 源头关 IPv6 / WDS 能力校验 / 网桥就绪文件校验（极简网桥版追加）
 # 全部在 make defconfig 之前完成，否则 .config 里的 DEVICE_cucc_vs010 会被丢掉。
 #
 set -euo pipefail
@@ -122,4 +123,55 @@ echo "--- 02_network ---"
 grep -nE -A6 'cucc,vs010)' "$NET"
 echo "--- caldata ---"
 grep -nE 'cucc,vs010|caldata_extract' "$CAL"
+# ═══════════════════ 5. 源头关闭 IPv6 / 冗余默认包 ═══════════════════
+# QSDK 树 include/target.mk 里 DEFAULT_PACKAGES.router 带 ipv6helper、
+# tweak 带 10 个插件；make defconfig 会重新写回 .config，必须改 Makefile。
+TM="include/target.mk"
+test -f "$TM" || { echo "::error::缺 $TM"; exit 1; }
+cp "$TM" "$TM.bak"
+python3 - "$TM" <<'PYEOF'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+new_router = "DEFAULT_PACKAGES.router:=\\\n\tdnsmasq \\\n\tfirewall \\\n\tiptables\n"
+new_tweak  = "DEFAULT_PACKAGES.tweak:=\\\n\tluci\n"
+s, n1 = re.subn(r'DEFAULT_PACKAGES\.router:=\\\n(?:.*\\\n)*?\tppp-mod-pppoe\n', new_router, s, count=1)
+s, n2 = re.subn(r'DEFAULT_PACKAGES\.tweak:=\\\n(?:.*\\\n)*?\tluci-lib-ipkg\n', new_tweak, s, count=1)
+if n1 != 1 or n2 != 1:
+    print("::error::target.mk 替换失败 router=%d tweak=%d" % (n1, n2))
+    sys.exit(1)
+open(p, 'w', encoding='utf-8').write(s)
+PYEOF
+grep -q 'ipv6helper' "$TM" && { echo "::error::ipv6helper 仍在 target.mk"; exit 1; } || true
+echo "[diy-part2] include/target.mk 已精简（ipv6helper / tweak 插件从源头移除）"
+
+# ═══════════════════ 6. WDS / 4addr 能力校验 ═══════════════════
+# QSDK 树自带 4addr + NSS WDS offload 补丁，NSS 与 WDS 是配套设计，
+# 不要关硬件加速（这跟主线 ath11k / WED 与 4addr 冲突是两回事）。
+SH="package/kernel/mac80211/files/lib/netifd/wireless/mac80211.sh"
+grep -q '4addr on' "$SH" || { echo "::error::netifd 缺 4addr 支持"; exit 1; }
+for p in \
+  "149-ath11k-fix-4addr-tx-failure-AP-STA-modes.patch" \
+  "211-002-ath11k-add-WDS-offload-support-on-NSS-offload-for-STA-mode.patch" \
+  "216-ath11k-send-multicast-in-4addr.patch" \
+  "330-ath11k-sync-wds_ast_entry-updates.patch"; do
+  test -f "package/kernel/mac80211/patches/all-ipq50xx/$p" \
+    || { echo "::error::缺 WDS 补丁 $p"; exit 1; }
+done
+echo "[diy-part2] WDS 4addr / NSS offload 四项补丁齐备"
+grep -q '^CONFIG_PACKAGE_wpad-basic-wolfssl=y' .config \
+  && echo "[diy-part2] wpad-basic-wolfssl 已启用（WDS 不需要完整 hostapd）" \
+  || echo "::warning::wpad 未显式启用，defconfig 会按 DEFAULT_PACKAGES 补上"
+
+# ═══════════════════ 7. 网桥就绪文件校验 ═══════════════════
+# workflow 的 Load config 步骤会把仓库 files/ 搬到 openwrt/files/
+test -s "files/etc/uci-defaults/99-bridge-ready" \
+  || { echo "::error::缺 99-bridge-ready（网桥 STP / 关 IPv6 配置面）"; exit 1; }
+test -s "files/usr/sbin/portstat" \
+  || echo "::warning::缺 portstat（不影响编译，只影响验收）"
+echo "[diy-part2] 网桥就绪文件已就位"
+
+# 注：nss-dp 的 ethtool 速率上报补丁由 workflow 的独立 step 注入到
+# package/kernel/qca/qca-nss-dp/patches/，这里不重复处理。
+
 echo "==================== [diy-part2] 完成 ===================="

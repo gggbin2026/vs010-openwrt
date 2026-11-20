@@ -1,0 +1,54 @@
+#!/bin/sh
+# 首次开机执行一次：把 RAX3000Q 收拾成「WDS 网桥就绪」状态
+# 只做两端通用的事，不碰 DHCP / IP —— 主端要发地址，副端才关 DHCP，
+# 角色相关的配置见 WDS网桥配置.md，别在这里一刀切。
+. /lib/functions.sh
+
+# ── 1. 彻底清掉 IPv6 配置面（编译层已关内核 IPv6，这里清 /etc/config） ──
+uci -q delete network.wan6
+uci -q delete network.lan.ip6assign
+uci -q delete network.lan.ip6hint
+uci -q delete dhcp.lan.ra
+uci -q delete dhcp.lan.dhcpv6
+uci -q delete dhcp.lan.ndp
+uci set dhcp.lan.ra='disabled'
+uci set dhcp.lan.dhcpv6='disabled'
+uci set dhcp.lan.ndp='disabled'
+uci -q delete dhcp.wan6
+# 全局不再有 DHCPv6/RA 服务
+if [ -x /etc/init.d/odhcpd ]; then
+    /etc/init.d/odhcpd disable 2>/dev/null || true
+    /etc/init.d/odhcpd stop 2>/dev/null || true
+fi
+
+# ── 2. 二层桥接：开 STP，关掉用不上的 NAT/防火墙过滤 ──
+# WDS 两端都是透明桥，不做路由、不做 NAT；防火墙全放行避免误拦桥内流量
+uci set network.lan.stp='1'
+uci set network.lan.force_link='1'
+if uci -q get firewall.@defaults[0] >/dev/null; then
+    uci set firewall.@defaults[0].input='ACCEPT'
+    uci set firewall.@defaults[0].output='ACCEPT'
+    uci set firewall.@defaults[0].forward='ACCEPT'
+    uci set firewall.@defaults[0].flow_offloading='0'
+    uci set firewall.@defaults[0].flow_offloading_hw='0'
+    uci commit firewall
+fi
+uci commit network
+uci commit dhcp
+
+# ── 3. 无线：固定到合规区域，加密交给用户按角色配 ──
+# 只设国家码，不设 SSID/密码/模式 —— 那三项按 A(AP-WDS)/B(STA-WDS) 分别配
+uci set wireless.radio0.country='CN' 2>/dev/null || true
+uci set wireless.radio1.country='CN' 2>/dev/null || true
+uci set wireless.radio0.disabled='0' 2>/dev/null || true
+uci set wireless.radio1.disabled='0' 2>/dev/null || true
+uci commit wireless 2>/dev/null || true
+
+# ── 4. 关掉开机自启的无关服务（能省一点 256MB 内存） ──
+for s in odhcpd dnsmasq_full_ipv6; do
+    [ -x "/etc/init.d/$s" ] && /etc/init.d/"$s" disable 2>/dev/null || true
+done
+
+# uci-defaults 执行完删掉自己，避免每次重启重复改
+rm -f /etc/uci-defaults/99-bridge-ready
+exit 0
