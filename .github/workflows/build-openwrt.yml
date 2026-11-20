@@ -1,14 +1,20 @@
 #
-# VS010 (CUCC / Unicom AX3000) — QSDK 底座编译
-# 骨架来自 kkstone/Actions-OpenWrt-RAX3000Q (P3TERX/Actions-OpenWrt)
-# 底座源码保持 RAX3000Q 那套 5.4-QSDK 树，设备层全部换成 VS010：
-#   .config 设备符号 / DTS / image 定义 / 02_network / 11-ath11k-caldata
+# 联通 VS010 (CUCC AX3000) —— 极简 WDS 网桥固件
+# 底座: kkstone/immortalwrt-ipq50xx @ openwrt-21.02 (5.4-QSDK + swconfig + NSS)
 #
-# ⚠️ 使用前请删掉仓库里旧的 .github/workflows/build.yml
-#     （那份 clone 的是 openwrt/openwrt main 6.12，与本套 QSDK 树不共存）
+# 相对上一版（VS010_QSDK_修复包）的变化：
+#   * .config 330 包 / IPv6 全开 -> 137 包 / IPv6 从内核到配置面全关
+#   * 新增 defconfig -> slim -> defconfig 三段收敛 + 硬校验
+#   * 新增 nss-dp ethtool 补丁注入 + 编译后确认（修网口速率显示）
+#   * 新增 files/ 网桥就绪脚本（STP / 防火墙全放行 / 关 RA-DHCPv6）
+#   * 删掉 Generate release tag / Upload firmware to release 两步
+#   * 加 permissions / pipefail / 产物强校验 / 失败也传日志
+#
+# ⚠️ 仓库里旧的 .github/workflows/build.yml（OpenWrt main 6.12 + DSA）必须删掉，
+#    两个 workflow 同时 push 触发会互相污染。本包只提供这一个。
 #
 
-name: Build VS010 (QSDK 5.4)
+name: Build VS010 slim WDS (QSDK 5.4)
 
 on:
   workflow_dispatch:
@@ -24,17 +30,19 @@ on:
         default: 'false'
         type: boolean
 
+permissions:
+  contents: write
+  actions: write
+
 env:
-  # ── 保持 RAX3000Q 仓库原值：这才是 5.4-QSDK / NSS WiFi 的正确底座 ──
   REPO_URL: https://github.com/kkstone/immortalwrt-ipq50xx
   REPO_BRANCH: openwrt-21.02
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
+  SLIM_SH: slim.sh
   UPLOAD_FIRMWARE: true
-  UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
 
 jobs:
@@ -59,7 +67,6 @@ jobs:
         sudo rm -rf /usr/share/dotnet /usr/local/graalvm /usr/local/.ghcup \
           /usr/local/share/powershell /usr/local/share/chromium /usr/local/lib/android \
           /usr/local/lib/node_modules || true
-        df -h
         sudo -E apt-get -qq update
         sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison \
           build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar \
@@ -78,20 +85,21 @@ jobs:
       working-directory: /workdir
       run: |
         set -e
-        df -hT $PWD
         git clone --depth=1 -b $REPO_BRANCH $REPO_URL openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
         echo "=== 底座关键路径自检 ==="
         test -f openwrt/target/linux/ipq50xx/image/Makefile || { echo "::error::底座结构不对"; exit 1; }
         test -f openwrt/target/linux/ipq50xx/dts/ipq5000-rax3000q.dts || { echo "::error::缺 rax3000q DTS 模板"; exit 1; }
         grep -q 'qcom,ess-switch-qca83xx' openwrt/target/linux/ipq50xx/dts/ipq5000-rax3000q.dts \
-          || { echo "::error::这不是 QSDK 树"; exit 1; }
+          || { echo "::error::这不是 QSDK 树（别把 DSA DTS 塞进来）"; exit 1; }
+        test -f openwrt/package/kernel/qca/qca-nss-dp/Makefile \
+          || { echo "::error::缺 qca-nss-dp（ethtool 补丁无处可打）"; exit 1; }
 
     - name: Enable build ccache
       uses: klever1988/cachewrtbuild@main
       with:
         ccache: 'true'
-        mixkey: 'vs010-ipq50xx-qsdk-5.4-256m'
+        mixkey: 'vs010-ipq50xx-qsdk-5.4-slim-wds'
         prefix: ${{ github.workspace }}/openwrt
 
     - name: Load custom feeds
@@ -111,11 +119,21 @@ jobs:
     - name: Load custom configuration + inject VS010
       run: |
         set -euo pipefail
+        # files/ 里的网桥就绪脚本会被搬进 openwrt/files/，随镜像打包
         [ -e files ] && mv files openwrt/files
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
+        chmod +x $DIY_P2_SH $SLIM_SH
         cd openwrt
         USE_NWRT_DTS="${{ inputs.use_nwrt_dump_dts }}" $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: Inject nss-dp ethtool fix
+      run: |
+        set -euo pipefail
+        chmod +x $GITHUB_WORKSPACE/inject-ethtool-patch.sh
+        cd openwrt
+        $GITHUB_WORKSPACE/inject-ethtool-patch.sh
+        test -s package/kernel/qca/qca-nss-dp/patches/999-nss-dp-ethtool-fixed-link.patch \
+          || { echo "::error::ethtool 补丁未落位"; exit 1; }
 
     - name: SSH connection to Actions
       uses: owenthereal/action-upterm@v1
@@ -125,24 +143,43 @@ jobs:
       run: |
         cd openwrt
         mkdir -p dl
-        # 5.4-QSDK 内核/backports 常有源站失效；能下就下，下不到让 make download 自己试
         curl -sSL --max-time 120 -o dl/backports-20210222-5.4-qsdk-11.5.0.5.tar.xz \
           "https://www.dropbox.com/scl/fi/9ts30p2csnlb9imaf8k68/backports-20210222-5.4-qsdk-11.5.0.5.tar.xz?rlkey=sntbyfjgg86gu2uoocgb9ggp1&st=7w81hl56&dl=1" || rm -f dl/backports-20210222-5.4-qsdk-11.5.0.5.tar.xz
         curl -sSL --max-time 120 -o dl/linux-5.4-qsdk-11.5.0.5.tar.xz \
           "https://www.dropbox.com/scl/fi/gu7ge6jmefn72ttuop1zs/linux-5.4-qsdk-11.5.0.5.tar.xz?rlkey=tdpq0ye35x290frbh7i8uqrm8&st=jjvegqrr&dl=1" || rm -f dl/linux-5.4-qsdk-11.5.0.5.tar.xz
         find dl -maxdepth 1 -size -1024c -type f -delete || true
 
-    - name: Download package
-      id: package
+    - name: defconfig -> slim -> defconfig (防 IPv6 / 插件被拉回)
       run: |
         set -euo pipefail
         cd openwrt
         make defconfig
-        echo "=== 设备符号校验 ==="
+        $GITHUB_WORKSPACE/$SLIM_SH
+        make defconfig
+        echo "=== 最终配置硬校验 ==="
+        Y=$(grep -c '^CONFIG_PACKAGE_.*=y$' .config || true)
+        echo "  启用包数: $Y（原仓库 330）"
         grep -E '^CONFIG_TARGET_ipq50xx_arm_DEVICE_cucc_vs010=y' .config \
-          || { echo "::error::cucc_vs010 未进入 .config，检查 diy-part2.sh 注入是否成功"; exit 1; }
+          || { echo "::error::cucc_vs010 设备符号丢失"; exit 1; }
         grep -E '^CONFIG_ATH11K_MEM_PROFILE_256M=y' .config \
-          || echo "::warning::256M 内存优化未生效，ath11k 可能 OOM"
+          || { echo "::error::256M 内存优化丢失（WiFi 会 OOM）"; exit 1; }
+        grep -E '^CONFIG_ATH11K_NSS_SUPPORT=y' .config \
+          || echo "::warning::NSS WiFi 未启用"
+        if grep -Eq '^CONFIG_(IPV6|KERNEL_IPV6)=y' .config; then
+          echo "::error::IPv6 又被拉回来了"; grep -E '^CONFIG_(IPV6|KERNEL_IPV6)' .config; exit 1
+        fi
+        if grep -Eq '^CONFIG_PACKAGE_(ipv6helper|odhcp6c|odhcpd-ipv6only|luci-proto-ipv6|6in4|natmap)=y' .config; then
+          echo "::error::IPv6 相关包又被拉回来了"; exit 1
+        fi
+        if grep -q '^CONFIG_PACKAGE_ipq-wifi-cmcc_rax3000q=y' .config; then
+          echo "::error::误打包了 RAX3000Q 的 BDF（VS010 走 0:ART caldata）"; exit 1
+        fi
+        echo "  ✓ 设备 / 256M / NSS / IPv6 / BDF 全部符合预期"
+
+    - name: Download package
+      run: |
+        set -euo pipefail
+        cd openwrt
         make download -j8
         find dl -size -1024c -exec rm -f {} \;
 
@@ -152,7 +189,6 @@ jobs:
         set -euo pipefail
         cd openwrt
         echo -e "$(nproc) thread compile"
-        # 原骨架的 `make || make -j1 || make -j1 V=s` 会吞掉第一次失败，保留但加日志
         make -j$(nproc) V=s 2>&1 | tee build.log || {
           echo "::error::编译失败，build.log 已上传"; exit 1;
         }
@@ -160,6 +196,17 @@ jobs:
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
         echo "=== 产物 ==="
         ls -lh bin/targets/ipq50xx/arm/*vs010* || true
+
+    - name: Verify ethtool patch applied
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        set -euo pipefail
+        cd openwrt
+        SRC=$(find build_dir -name nss_dp_ethtools.c -path '*qca-nss-dp*' 2>/dev/null | head -1)
+        test -n "$SRC" || { echo "::error::找不到 nss_dp_ethtools.c"; exit 1; }
+        grep -q 'nss_dp_get_link_ksettings' "$SRC" \
+          || { echo "::error::补丁未被 Build/Prepare 应用，网口速率修复不会生效"; exit 1; }
+        echo "  ✓ nss_dp_get_link_ksettings 已编入: $SRC"
 
     - name: Check space usage
       if: (!cancelled())
@@ -169,18 +216,23 @@ jobs:
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        cd openwrt/bin/targets/*/*
+        set -euo pipefail
+        cd openwrt/bin/targets/ipq50xx/arm
         rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        mkdir -p $GITHUB_WORKSPACE/firmware_out
+        cp -a *vs010* $GITHUB_WORKSPACE/firmware_out/ 2>/dev/null || true
+        echo "=== 交付产物 ==="
+        ls -lh $GITHUB_WORKSPACE/firmware_out/
+        test -n "$(ls $GITHUB_WORKSPACE/firmware_out/*factory.ubi 2>/dev/null)" \
+          || { echo "::error::没有 nand-factory.ubi"; exit 1; }
+        echo "FIRMWARE=$GITHUB_WORKSPACE/firmware_out" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "=== 最终产物 ==="
-        ls -lh *vs010* || echo "::warning::没有找到 *vs010* 产物"
 
     - name: Upload firmware directory
       uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: VS010_QSDK_firmware${{ env.FILE_DATE }}
+        name: VS010_slim_WDS${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
         if-no-files-found: error
         retention-days: 30
@@ -193,21 +245,3 @@ jobs:
         path: openwrt/build.log
         if-no-files-found: ignore
         retention-days: 14
-
-    - name: Generate release tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-        echo "release_tag=VS010-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
