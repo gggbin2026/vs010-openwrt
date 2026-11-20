@@ -9,7 +9,6 @@
 #   * 新增 files/ 网桥就绪脚本（STP / 防火墙全放行 / 关 RA-DHCPv6）
 #   * 删掉 Generate release tag / Upload firmware to release 两步
 #   * 加 permissions / pipefail / 产物强校验 / 失败也传日志
-#   * 2026-11-20: 设备符号校验失败时打印 targetinfo 诊断（配合 diy-part2.sh 位置修复）
 #
 # ⚠️ 仓库里旧的 .github/workflows/build.yml（OpenWrt main 6.12 + DSA）必须删掉，
 #    两个 workflow 同时 push 触发会互相污染。本包只提供这一个。
@@ -160,16 +159,8 @@ jobs:
         echo "=== 最终配置硬校验 ==="
         Y=$(grep -c '^CONFIG_PACKAGE_.*=y$' .config || true)
         echo "  启用包数: $Y（原仓库 330）"
-        if ! grep -qE '^CONFIG_TARGET_ipq50xx_arm_DEVICE_cucc_vs010=y' .config; then
-          echo "::error::cucc_vs010 设备符号丢失；以下是定位线索："
-          echo "--- tmp/.config-target.in 里的 cucc_vs010 ---"
-          grep -n 'cucc_vs010' tmp/.config-target.in 2>/dev/null || echo '(无 → targetinfo 没扫到设备定义，检查 image/Makefile 注入位置)'
-          echo "--- tmp/.targetinfo 里的 DEVICE_ profile ---"
-          grep -n 'DEVICE_' tmp/.targetinfo 2>/dev/null | head -20 || true
-          echo "--- image/Makefile 里 TARGET_DEVICES / BuildImage 行号 ---"
-          grep -nE '^TARGET_DEVICES \+=|^\$\(eval \$\(call BuildImage\)\)' target/linux/ipq50xx/image/Makefile || true
-          exit 1
-        fi
+        grep -E '^CONFIG_TARGET_ipq50xx_arm_DEVICE_cucc_vs010=y' .config \
+          || { echo "::error::cucc_vs010 设备符号丢失"; exit 1; }
         grep -E '^CONFIG_ATH11K_MEM_PROFILE_256M=y' .config \
           || { echo "::error::256M 内存优化丢失（WiFi 会 OOM）"; exit 1; }
         grep -E '^CONFIG_ATH11K_NSS_SUPPORT=y' .config \
@@ -180,10 +171,19 @@ jobs:
         if grep -Eq '^CONFIG_PACKAGE_(ipv6helper|odhcp6c|odhcpd-ipv6only|luci-proto-ipv6|6in4|natmap)=y' .config; then
           echo "::error::IPv6 相关包又被拉回来了"; exit 1
         fi
+        if ! grep -q '^CONFIG_PACKAGE_MAC80211_DEBUGFS=y' .config; then
+          echo "::error::MAC80211_DEBUGFS 被关掉 —— QSDK 11.5 ath11k 会报 'struct ath11k has no member named debug'"; exit 1
+        fi
         if grep -q '^CONFIG_PACKAGE_ipq-wifi-cmcc_rax3000q=y' .config; then
           echo "::error::误打包了 RAX3000Q 的 BDF（VS010 走 0:ART caldata）"; exit 1
         fi
         echo "  ✓ 设备 / 256M / NSS / IPv6 / BDF 全部符合预期"
+
+    - name: Prefetch ath-kernel tarball (avoid flaky git clone)
+      run: |
+        set -euo pipefail
+        chmod +x "$GITHUB_WORKSPACE/prefetch-ath-kernel.sh"
+        "$GITHUB_WORKSPACE/prefetch-ath-kernel.sh" openwrt/dl
 
     - name: Download package
       run: |
