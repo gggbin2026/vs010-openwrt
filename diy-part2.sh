@@ -38,18 +38,42 @@ fi
 test -s "$DTS_DIR/ipq5018-vs010.dts" || { echo "::error::DTS 注入失败"; exit 1; }
 
 # ─────────────────── 2. image/Makefile 设备定义 ───────────────────
+# 【2026-11-20 编译报错修复】
+#   旧版用 `cat >> "$IMG"` 把 Device 块追加到文件末尾，但官方 image/Makefile
+#   最后一行是 `$(eval $(call BuildImage))`，而 include/image.mk 第 740 行：
+#       define BuildImage
+#         $(foreach device,$(TARGET_DEVICES),$(call Device,$(device)))
+#   TARGET_DEVICES 在 BuildImage 展开那一刻就被消费掉。追加在它之后 →
+#   DUMP=1 的 tmp/.targetinfo 里没有 DEVICE_cucc_vs010 profile →
+#   target-metadata.pl 不生成 `config TARGET_ipq50xx_arm_DEVICE_cucc_vs010`
+#   → make defconfig 把 .config 里的这个未知符号丢掉 → 报"设备符号丢失"。
+#
+#   修复：与官方 3 个 Device 定义一样，插入到 `$(eval $(call BuildImage))` 之前。
 IMG="$TGT/image/Makefile"
-# 防重复（同一 job 里重跑时）
-sed -i '/^# ── CUCC \/ Unicom VS010/,/^TARGET_DEVICES += cucc_vs010/d' "$IMG"
+test -s "$IMG" || { echo "::error::缺 $IMG"; exit 1; }
 
-cat >> "$IMG" <<'MKEOF'
+python3 - "$IMG" <<'PYEOF'
+import sys, re
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
 
-# ── CUCC / Unicom VS010 ───────────────────────────────────────────
-# 与 cmcc_rax3000q 同平台（IPQ5018 + QCN6102 + QCA8337），但：
-#   * DTS 换成 VS010（RESET GPIO33 / LED GPIO35 / switch 位图不同）
-#   * 不打包 ipq-wifi-cmcc_rax3000q（那是 RAX3000Q 的 BDF，刷进来 5G 校准必错）
-#     校准改由 11-ath11k-caldata 从本机 0:ART 分区提取
-#   * 不覆盖 IMAGES，保留 UbiFit 的 nand-factory.ubi + nand-sysupgrade.bin
+# 1) 幂等：删掉任何历史注入块（含旧版追加到文件末尾的那一份）
+s = re.sub(
+    r'\n*# ── CUCC / Unicom VS010.*?\nTARGET_DEVICES \+= cucc_vs010[ \t]*\n',
+    '\n', s, flags=re.S)
+
+# 2) 定位 BuildImage 调用
+lines = s.splitlines(keepends=True)
+idx = next((i for i, l in enumerate(lines)
+            if l.startswith('$(eval $(call BuildImage))')), -1)
+if idx < 0:
+    print('::error::image/Makefile 里找不到行首的 BuildImage 调用，底座可能变了')
+    sys.exit(1)
+
+block = """# ── CUCC / Unicom VS010 ───────────────────────────────────────────
+# 必须放在文件末尾的 BuildImage 调用之前，否则 TARGET_DEVICES 不会被消费。
+# 与 cmcc_rax3000q 同平台；不打包 ipq-wifi-cmcc_rax3000q（那是别的机器 BDF），
+# 校准由 11-ath11k-caldata 从本机 0:ART 分区提取。
 define Device/cucc_vs010
   $(call Device/FitImage)
   $(call Device/UbiFit)
@@ -60,16 +84,32 @@ define Device/cucc_vs010
   BLOCKSIZE := 128k
   PAGESIZE := 2048
   DEVICE_DTS_CONFIG := config@mp02.1
-  DEVICE_PACKAGES := \
-	ath11k-firmware-ipq5018 \
-	ath11k-firmware-qcn6122 \
+  DEVICE_PACKAGES := \\
+	ath11k-firmware-ipq5018 \\
+	ath11k-firmware-qcn6122 \\
 	iperf3
 endef
 TARGET_DEVICES += cucc_vs010
-MKEOF
 
-grep -q '^TARGET_DEVICES += cucc_vs010' "$IMG" || { echo "::error::设备定义注入失败"; exit 1; }
-echo "[diy-part2] Device/cucc_vs010 已追加"
+"""
+lines.insert(idx, block)
+open(p, 'w', encoding='utf-8').write(''.join(lines))
+PYEOF
+
+# 3) 三重校验：存在 / 唯一 / 位置在 BuildImage 之前
+CNT=$(grep -c '^TARGET_DEVICES += cucc_vs010' "$IMG" || true)
+[ "$CNT" = "1" ] || { echo "::error::cucc_vs010 设备定义数量异常（$CNT）"; exit 1; }
+python3 - "$IMG" <<'PYEOF'
+import sys
+ls = open(sys.argv[1], encoding='utf-8').read().splitlines()
+d = next((i for i, l in enumerate(ls) if l.startswith('TARGET_DEVICES += cucc_vs010')), -1)
+b = next((i for i, l in enumerate(ls) if l.startswith('$(eval $(call BuildImage))')), -1)
+if not (0 <= d < b):
+    print('::error::TARGET_DEVICES 必须在行首的 BuildImage 调用之前 (dev=%d, bi=%d)' % (d, b))
+    sys.exit(1)
+print('[diy-part2] 位置校验通过: TARGET_DEVICES@行%d < BuildImage@行%d' % (d + 1, b + 1))
+PYEOF
+echo "[diy-part2] Device/cucc_vs010 已插入到 BuildImage 之前"
 
 # ─────────────────────── 3. 02_network（swconfig） ───────────────────────
 # 【PZ-L8 借鉴 · 2026-11-20 核实】
@@ -135,12 +175,16 @@ p = sys.argv[1]
 s = open(p, encoding='utf-8').read()
 new_router = "DEFAULT_PACKAGES.router:=\\\n\tdnsmasq \\\n\tfirewall \\\n\tiptables\n"
 new_tweak  = "DEFAULT_PACKAGES.tweak:=\\\n\tluci\n"
-s, n1 = re.subn(r'DEFAULT_PACKAGES\.router:=\\\n(?:.*\\\n)*?\tppp-mod-pppoe\n', new_router, s, count=1)
-s, n2 = re.subn(r'DEFAULT_PACKAGES\.tweak:=\\\n(?:.*\\\n)*?\tluci-lib-ipkg\n', new_tweak, s, count=1)
-if n1 != 1 or n2 != 1:
-    print("::error::target.mk 替换失败 router=%d tweak=%d" % (n1, n2))
-    sys.exit(1)
-open(p, 'w', encoding='utf-8').write(s)
+# 幂等：若已精简（ipv6helper 不在）就跳过，避免同一棵树重复跑时误报
+if 'ipv6helper' not in s:
+    print('[target.mk] 已是精简状态，跳过')
+else:
+    s, n1 = re.subn(r'DEFAULT_PACKAGES\.router:=\\\n(?:.*\\\n)*?\tppp-mod-pppoe\n', new_router, s, count=1)
+    s, n2 = re.subn(r'DEFAULT_PACKAGES\.tweak:=\\\n(?:.*\\\n)*?\tluci-lib-ipkg\n', new_tweak, s, count=1)
+    if n1 != 1 or n2 != 1:
+        print("::error::target.mk 替换失败 router=%d tweak=%d" % (n1, n2))
+        sys.exit(1)
+    open(p, 'w', encoding='utf-8').write(s)
 PYEOF
 grep -q 'ipv6helper' "$TM" && { echo "::error::ipv6helper 仍在 target.mk"; exit 1; } || true
 echo "[diy-part2] include/target.mk 已精简（ipv6helper / tweak 插件从源头移除）"
