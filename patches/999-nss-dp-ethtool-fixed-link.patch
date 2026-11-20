@@ -1,8 +1,6 @@
-diff --git a/nss_dp_ethtools.c b/nss_dp_ethtools.c
-index a614641..ecb5c78 100644
 --- a/nss_dp_ethtools.c
 +++ b/nss_dp_ethtools.c
-@@ -102,6 +102,51 @@ static int32_t nss_dp_set_settings(struct net_device *netdev,
+@@ -102,6 +102,53 @@
  }
  #endif
  
@@ -18,6 +16,10 @@ index a614641..ecb5c78 100644
 + * "Speed: Unknown! / Duplex: Half".  CPU (fixed-link) ports have no PHY
 + * at all and are hardwired to 1000M full-duplex by the board DTS.
 + *
++ * Only speed/duplex/port/phy_address/autoneg are touched: these fields exist
++ * in every 5.4-era struct ethtool_link_settings.  Do NOT use mdix /
++ * eth_tp_mdix / eth_tp_mdix_ctrl here -- QSDK 5.4 variants differ, and
++ * the mdix shorthand does not exist at all (build error in run #1).
 + * This only affects reporting; the data path is untouched.
 + */
 +static int nss_dp_get_link_ksettings(struct net_device *netdev,
@@ -31,8 +33,6 @@ index a614641..ecb5c78 100644
 +
 +	cmd->base.port = PORT_MII;
 +	cmd->base.phy_address = 0;
-+	cmd->base.mdix = ETH_TP_MDI_INVALID;
-+	cmd->base.eth_tp_mdix_ctrl = ETH_TP_MDI_AUTO;
 +	cmd->base.autoneg = AUTONEG_DISABLE;
 +
 +	if (dp_priv->phydev && dp_priv->phydev->speed) {
@@ -54,7 +54,7 @@ index a614641..ecb5c78 100644
  /*
   * nss_dp_get_pauseparam()
   */
-@@ -372,7 +417,7 @@ struct ethtool_ops nss_dp_ethtool_ops = {
+@@ -372,7 +419,7 @@
  	.get_settings = &nss_dp_get_settings,
  	.set_settings = &nss_dp_set_settings,
  #else
