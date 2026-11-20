@@ -71,18 +71,30 @@ grep -q '^TARGET_DEVICES += cucc_vs010' "$IMG" || { echo "::error::设备定义�
 echo "[diy-part2] Device/cucc_vs010 已追加"
 
 # ─────────────────────── 3. 02_network（swconfig） ───────────────────────
+# 【PZ-L8 借鉴 · 2026-11-20 核实】
+#   主线 target/linux/qualcommax/dts/ipq5018-pz-l8.dts 与 xiangye277 的
+#   VS010 DTS 相似度 81.2%，后者本就是 PZ-L8 改编。两个独立来源一致：
+#     qca8337 phy0 -> lan3 / phy1 -> lan2 / phy2 -> lan1 / phy3 -> wan
+#     phy4 -> IPQ5018 GE Phy (gmac0)，port0 -> SGMII (gmac1)
+#   原版按 NWRT 的 switch_lan_bmp=0x1e 推成「4 个口全是 lan」，
+#   与 PZ-L8 / xiangye277 冲突，这里改回带独立 wan 的映射。
+#   ⚠️ 首刷仍需 `swconfig dev switch1 show` 逐个插线确认 RJ45 对应。
+#
+#   PZ-L8 只在 OpenWrt main / qualcommax (6.12 + DSA) 受官方支持；
+#   本仓库的 kkstone QSDK 21.02 树没有 PZ-L8，故只借「参数真值」，
+#   不换底座、不套 DSA DTS（两套交换栈互斥）。
 NET="$TGT/base-files/etc/board.d/02_network"
 sed -i '/cucc,vs010)/,/^[[:space:]]*;;/d' "$NET"
 # 在 case 第一个分支前插入 VS010 分支
 sed -i '/^[[:space:]]*case \$board in/a\		cucc,vs010)\
-			# 位图取自 NWRT fdt dump: lan=0x1e(port1-4) cpu=0x40(port6) wan=0x00\
-			# ⚠️ 端口编号<->RJ45 对应关系需首刷实测：swconfig dev switch1 show\
+			# PHY 顺序借鉴 CMCC PZ-L8 / xiangye277 VS010 DTS\
+			# CPU 位图仍用 NWRT fdt dump: cpu=0x40(port6) lan=0x1e；RJ45 对应需实测\
 			ucidef_add_switch "switch1" \\\
-				"6u@eth1" "0u@eth0" \\\
-				"1:lan:1" "2:lan:2" "3:lan:3" "4:lan:4"\
+				"6u@eth1" "3u@eth0" \\\
+				"1:lan:3" "2:lan:2" "3:lan:1" "4:wan"\
 			;;' "$NET"
 grep -q 'cucc,vs010)' "$NET" || { echo "::error::02_network 注入失败"; exit 1; }
-echo "[diy-part2] 02_network 已注入 cucc,vs010（swconfig）"
+echo "[diy-part2] 02_network 已注入 cucc,vs010（PZ-L8 PHY 顺序，swconfig）"
 
 # ──────────────── 4. 11-ath11k-caldata（ART 校准） ────────────────
 CAL="$TGT/base-files/etc/hotplug.d/firmware/11-ath11k-caldata"
