@@ -7,7 +7,8 @@
 #   * 新增 defconfig -> slim -> defconfig 三段收敛 + 硬校验
 #   * 新增 nss-dp ethtool 补丁注入 + 编译后确认（修网口速率显示）
 #   * 新增 files/ 网桥就绪脚本（STP / 防火墙全放行 / DHCP 开关）
-#   * 产物固件文件名统一以 QSDK- 开头，自动发布到 Releases
+#   * 产物固件文件名统一以 Nwrt-QSDK12.2- 开头，自动发布到 Releases
+#   * 每次编译把构建记录追加回仓库 BUILD_HISTORY.md
 #   * 删掉 Generate release tag / Upload firmware to release 两步
 #   * 加 permissions / pipefail / 产物强校验 / 失败也传日志
 #
@@ -26,9 +27,9 @@ on:
         default: 'false'
         type: boolean
       use_nwrt_dump_dts:
-        description: '用 NWRT 反编译的硬件真值 DTS（默认开，修网口用；关掉=旧的模板 DTS）'
+        description: '实验性：NWRT 反编译硬件真值 DTS（默认关＝模板 DTS；实测稳定，勾 true 曾触发 30s kernel panic）'
         required: false
-        default: 'true'
+        default: 'false'
         type: boolean
 
 permissions:
@@ -129,6 +130,16 @@ jobs:
         cd openwrt
         USE_NWRT_DTS="${{ inputs.use_nwrt_dump_dts }}" $GITHUB_WORKSPACE/$DIY_P2_SH
 
+        # ── 构建时间 = 本次编译真实时刻（上海）─────────────────
+        # SOURCE_DATE_EPOCH 让内核 / 文件 mtime / 版本时间戳都用本次编译时间，
+        # 不再沿用底座固定的旧日期；同时写进固件 /etc/compile_time 供 banner 显示。
+        BUILD_TIME="$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %Z')"
+        echo "SOURCE_DATE_EPOCH=$(date +%s)" >> $GITHUB_ENV
+        echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
+        mkdir -p files/etc
+        printf '%s\n' "$BUILD_TIME" > files/etc/compile_time
+        echo "  ✓ 构建时间: $BUILD_TIME"
+
     - name: Inject nss-dp ethtool fix
       run: |
         set -euo pipefail
@@ -192,6 +203,16 @@ jobs:
         if ! grep -q '^CONFIG_PACKAGE_MAC80211_MESH=y' .config; then
           echo "::error::MAC80211_MESH 被关掉 —— QSDK 11.5 的 debug_nss.c / debugfs_sta.c 会引用 mesh 成员与函数而编译失败"; exit 1
         fi
+
+        if ! grep -q '^CONFIG_PACKAGE_luci-theme-argon=y' .config; then
+          echo "::error::ARGON 主题未启用"; exit 1
+        fi
+        test -s files/etc/sysctl.d/99-no-icmp-redirect.conf \
+          || { echo "::error::ICMP 重定向关闭配置未打包"; exit 1; }
+        test -s files/etc/compile_time \
+          || { echo "::error::构建时间文件缺失"; exit 1; }
+        echo "  ✓ ARGON / ICMP 重定向 / 编译时间文件就位"
+
         echo "  ✓ 设备 / 256M / NSS / IPv6(关) / BDF 全部符合预期"
 
     - name: Verify NIC drivers & switch DTS
@@ -219,7 +240,7 @@ jobs:
         else
           grep -q 'qcom,ess-switch-qca83xx' "$VS" \
             || { echo "::error::VS010 DTS 缺 qca83xx 交换节点"; exit 1; }
-          echo "  ✓ VS010 模板 DTS 含 qca83xx 节点（刷后网口仍不通就改勾 use_nwrt_dump_dts=true）"
+          echo "  ✓ VS010 模板 DTS 含 qca83xx 节点（有线口已由「关 VLAN + 双 CPU 口进桥」修复）"
         fi
 
     - name: Prefetch ath-kernel tarball (avoid flaky git clone)
@@ -274,32 +295,34 @@ jobs:
         mkdir -p $GITHUB_WORKSPACE/firmware_out
         cp -a *vs010* $GITHUB_WORKSPACE/firmware_out/ 2>/dev/null || true
 
-        # ── 固件文件名：只把发行前缀换成 QSDK-，其余部分一字不改 ──
+        # ── 固件文件名：只把发行前缀换成 Nwrt-QSDK12.2-，其余部分一字不改 ──
         #   immortalwrt-ipq50xx-arm-cucc_vs010-...-factory.ubi
-        #   → QSDK-ipq50xx-arm-cucc_vs010-...-factory.ubi
+        #   注：前缀只是命名，不代表真的 QSDK 12.2 基线（实际 5.4 / NHSS.11.5.0.5）
+        #   → Nwrt-QSDK12.2-ipq50xx-arm-cucc_vs010-...-factory.ubi
         cd $GITHUB_WORKSPACE/firmware_out
         for f in *; do
           [ -f "$f" ] || continue
           case "$f" in
-            QSDK-*) continue ;;
-            [Ii][Mm][Mm][Oo][Rr][Tt][Aa][Ll][Ww][Rr][Tt]-*|[Oo][Pp][Ee][Nn][Ww][Rr][Tt]-*|[Ll][Ee][Dd][Ee]-*) new="QSDK-${f#*-}" ;;
+            Nwrt-QSDK12.2-*) continue ;;
+            [Qq][Ss][Dd][Kk]-*) new="Nwrt-QSDK12.2-${f#*-}" ;;
+            [Ii][Mm][Mm][Oo][Rr][Tt][Aa][Ll][Ww][Rr][Tt]-*|[Oo][Pp][Ee][Nn][Ww][Rr][Tt]-*|[Ll][Ee][Dd][Ee]-*) new="Nwrt-QSDK12.2-${f#*-}" ;;
             *) continue ;;
           esac
           [ "$new" = "$f" ] && continue
           mv -f -- "$f" "$new"
           echo "  重命名: $f → $new"
         done
-        # 兜底：万一底座换了别的前缀，factory.ubi 也保证以 QSDK- 开头
+        # 兜底：万一底座换了别的前缀，factory.ubi 也保证以 Nwrt-QSDK12.2- 开头
         for f in *factory.ubi; do
           [ -f "$f" ] || continue
-          case "$f" in QSDK-*) ;; *) mv -f -- "$f" "QSDK-$f"; echo "  重命名(兜底): $f → QSDK-$f" ;; esac
+          case "$f" in Nwrt-QSDK12.2-*) ;; *) mv -f -- "$f" "Nwrt-QSDK12.2-$f"; echo "  重命名(兜底): $f → Nwrt-QSDK12.2-$f" ;; esac
         done
-        # 校验：绝不放行旧前缀；必须有 QSDK-*factory.ubi
-        if ls -1 | grep -qiE '^(immortalwrt|openwrt|lede)-'; then
+        # 校验：绝不放行任何旧前缀；必须有 Nwrt-QSDK12.2-*factory.ubi
+        if ls -1 | grep -qiE '^(immortalwrt|openwrt|lede|qsdk)-'; then
           echo "::error::仍有旧前缀固件文件"; ls -lh; exit 1
         fi
-        test -n "$(ls -1 QSDK-*factory.ubi 2>/dev/null)" \
-          || { echo "::error::重命名后缺 QSDK-*factory.ubi"; ls -lh; exit 1; }
+        test -n "$(ls -1 Nwrt-QSDK12.2-*factory.ubi 2>/dev/null)" \
+          || { echo "::error::重命名后缺 Nwrt-QSDK12.2-*factory.ubi"; ls -lh; exit 1; }
         # 若顺带复制了校验文件，按新名字重算，避免名字对不上
         if [ -f sha256sums ]; then
           rm -f sha256sums
@@ -339,11 +362,14 @@ jobs:
           echo "- 构建时间（上海）：$(date '+%Y-%m-%d %H:%M:%S %Z')"
           echo "- Commit：${{ github.sha }}"
           echo "- Run：#${{ github.run_number }} / attempt ${{ github.run_attempt }}"
-          echo "- 内容：上海时区 CST-8 / 全射频 CN / ethtool 1000M-Full / NAND 421 / MESH+DEBUGFS / UBNT 开机成桥 / 网卡加固自检"
-          echo "- IPv6 编译期关闭（QSDK 5.4 ECM 稳定性）；DHCP 默认开，bridge-dhcp off 可关回纯透传"
-          echo "- 管理 IP：AP-WDS 192.168.1.2 / STA-WDS 192.168.1.3；固件文件名前缀 QSDK-"
+          echo "- 命名说明：前缀仅为文件名标识，实际基线 Linux 5.4 / NHSS.11.5.0.5，非 QSDK 12.2"
+          echo "- 日志：CHANGELOG.md（修复时间线）/ BUILD_HISTORY.md（每次编译自动追加）"
+          echo "- 内容：上海时区+编译时刻 / 全射频 CN / ARGON 主题 / ethtool 1000M-Full / NAND 421 / MESH+DEBUGFS / 有线口修复 / 关 ICMP 重定向"
+          echo "- IPv6 编译期关闭，WAN6 已删除；DHCP 默认开，bridge-dhcp off 可关回纯透传"
+          echo "- 管理 IP：192.168.1.241；账号 root / 密码 admin；WDS SSID WDS_AP / 密钥 WDS123456；STP 开；固件前缀 Nwrt-QSDK12.2-"
+          echo "- 有线修复：关 VLAN + eth0/eth1 都进 br-lan；构建时刻写入 /etc/compile_time"
           echo "- VS010 使用 NWRT 硬件真值 DTS（22 时钟 / 6 复位）修交换芯片 probe"
-          echo "- 刷机：QSDK-*-nand-factory.ubi；TTL 只接 TX/RX/GND，先备份 0:ART"
+          echo "- 刷机：Nwrt-QSDK12.2-*-nand-factory.ubi；TTL 只接 TX/RX/GND，先备份 0:ART"
         } > /tmp/relnotes.md
 
         if gh release view "$TAG" >/dev/null 2>&1; then
@@ -370,6 +396,38 @@ jobs:
             echo "  清理第 $i 个旧版：$t（保留最新 $KEEP 个）"
             gh release delete "$t" --yes --cleanup-tag || true
           done
+        fi
+    - name: Append build history to repository
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        # 每次编译把「构建时间 / run / commit / 产物 / 本版配置」追加回仓库，
+        # 出问题能按时间倒查是哪一轮改了什么。push 失败只告警，不影响固件与 Release。
+        STAMP="$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %Z')"
+        RUN_NO='${{ github.run_number }}'
+        RUN_ATTEMPT='${{ github.run_attempt }}'
+        SHA='${{ github.sha }}'
+        BRANCH='${{ github.ref_name }}'
+        FILES="$(cd "$FIRMWARE" && ls -1 | tr '\n' ' ')"
+        HDR='| 构建时间(上海) | Run | Commit | 产物 | 本版关键配置 |'
+        SEP='|---|---|---|---|---|'
+        grep -qF "$HDR" BUILD_HISTORY.md 2>/dev/null || printf '%s\n%s\n' "$HDR" "$SEP" >> BUILD_HISTORY.md
+        printf '| %s | #%s / attempt %s | `%s` | %s | 前缀 `Nwrt-QSDK12.2-` · ARGON · IP 192.168.1.241 · root/admin · WDS_AP/WDS123456 · STP 开 · IPv6 编译期关 · WAN6 删 · ICMP 重定向关 · 有线口修复(关 VLAN + eth0/eth1 进桥) |\n' \
+          "$STAMP" "$RUN_NO" "$RUN_ATTEMPT" "$SHA" "$FILES" \
+          >> BUILD_HISTORY.md
+        echo "  ✓ 已追加构建记录到 BUILD_HISTORY.md"
+        git config user.name  'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+        git add BUILD_HISTORY.md
+        if git diff --cached --quiet; then
+          echo "  BUILD_HISTORY.md 无新增内容，跳过提交"
+        else
+          git commit -m "chore: 记录构建 #${RUN_NO}（${STAMP}）[skip ci]"
+          git pull --rebase --autostash origin "$BRANCH" || true
+          git push origin "HEAD:$BRANCH" \
+            || echo "::warning::BUILD_HISTORY.md 推送失败（权限/并发），固件与 Release 不受影响"
         fi
     - name: Upload build log
       if: always()
