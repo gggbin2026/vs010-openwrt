@@ -1,0 +1,7 @@
+#!/bin/sh
+# 首次开机：启用 nic-guard 开机自检，并立刻跑一次
+[ -x /usr/sbin/nic-guard ] || exit 0
+chmod +x /usr/sbin/nic-guard /etc/init.d/nic-guard
+/etc/init.d/nic-guard enable 2>/dev/null || true
+( sleep 8; /usr/sbin/nic-guard >/dev/null 2>&1 ) &
+exit 0

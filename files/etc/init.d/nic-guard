@@ -1,0 +1,6 @@
+#!/bin/sh /etc/rc.common
+# 每次开机跑一次网卡自检（等驱动 probe 完）
+START=99
+start() {
+    ( sleep 8; /usr/sbin/nic-guard >/dev/null 2>&1 ) &
+}

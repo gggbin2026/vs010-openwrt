@@ -1,0 +1,52 @@
+#!/bin/sh
+# nic-guard —— 每次开机自检网卡/交换芯片，把诊断打到串口 + 落盘
+#   驱动 probe 是内核态，本脚本救不了 DTS 缺时钟；它做的是：
+#     1) 不让你把「插线没反应」误判成砖
+#     2) 把 swconfig list / ip link / dmesg 真因打到串口，一眼定位
+#     3) br-lan 建不起来时，给现存 ethX 临时配 192.168.1.9/24，保证能 SSH 进去救
+#   手动随时跑：  nic-guard
+LOG=/tmp/nic-guard.log
+
+if command -v swconfig >/dev/null 2>&1; then
+  SWCMD=swconfig
+else
+  SWCMD="echo [swconfig 未安装]"
+fi
+
+{
+  echo "================ nic-guard $(date) ================"
+  echo "--- /sys/class/net ---"
+  ls /sys/class/net/ 2>&1
+  echo "--- ip link ---"
+  ip link 2>&1
+  echo "--- swconfig list ---"
+  $SWCMD list 2>&1
+  echo "--- uci network ---"
+  uci show network 2>&1 | head -40
+  echo "--- dmesg: ssdk / ess-switch / nss-dp / gmac / clock / reset ---"
+  dmesg | grep -iE 'ssdk|ess-switch|nss-dp|gmac|qca83|switch|phy|clock|reset|probe' | tail -50
+} > "$LOG" 2>&1
+
+cat "$LOG" > /dev/console 2>/dev/null || true
+
+ETH=$(ls /sys/class/net/ 2>/dev/null | grep -E '^eth[0-9]+$' | head -1)
+SW=$($SWCMD list 2>/dev/null | sed -n 's/^Found: \(switch[0-9]*\).*/\1/p' | head -1)
+
+if [ -z "$ETH" ]; then
+  echo "[nic-guard] !! 内核里没有任何 ethX —— 交换驱动没 probe（通常是 DTS 时钟/复位不全）" > /dev/console
+  echo "[nic-guard] !! 用户态无法修复，需重编 DTS；完整诊断见 $LOG" > /dev/console
+  echo "[nic-guard] !! 这台没砖：TTL 能敲命令、U-Boot web 还能重刷 factory.ubi" > /dev/console
+else
+  echo "[nic-guard] OK ethX=$ETH  switch=${SW:-未注册}" > /dev/console
+  [ -z "$SW" ] && echo "[nic-guard] !! ethX 在但 switch 未注册：先跑 swconfig list 看实际名字" > /dev/console
+  [ -n "$SW" ] && [ "$SW" != "switch1" ] && \
+    echo "[nic-guard] !! switch 名是 $SW 不是 switch1，02_network 要按实际名字改" > /dev/console
+fi
+
+# 救急：br-lan 没建起来时给第一个 ethX 临时管理地址（不写 uci，重启即失效）
+if ! ip link show br-lan >/dev/null 2>&1 && [ -n "$ETH" ]; then
+  ip link set "$ETH" up 2>/dev/null || true
+  ip addr add 192.168.1.9/24 dev "$ETH" 2>/dev/null || true
+  echo "[nic-guard] 急救: $ETH 临时 192.168.1.9/24；电脑设 192.168.1.10 可 SSH 排查" > /dev/console
+fi
+cat "$LOG"

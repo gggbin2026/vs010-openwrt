@@ -1,127 +1,126 @@
-# 用 RAX3000Q 的编译材料，修好 VS010 的编译材料
+# CUCC VS010 · QSDK 5.4 极简 WDS 网桥固件
 
-## 0. 先说最关键的发现：你之前那几个"幽灵包"，其实不是幽灵
+> **开机即桥**：两台刷同一份固件，自动分成 AP-WDS 主端 / STA-WDS 客户端，纯二层透传。
+> 不是路由模式，不是 airOS，**不含 TDMA**。
+> GitHub Actions 自动编译，成功后固件自动发布到本仓库 **Releases**（永久保留、按时间戳存档）。
 
-这一轮把两个仓库的真实文件都拉下来核对后，前面几轮的困惑全部闭环了：
+## 一眼看懂
 
-| | `gggbin2026/vs010-openwrt`（你现在的） | `gggbin2026/Actions-OpenWrt-RAX3000Q` |
-|---|---|---|
-| 底座 | `openwrt/openwrt` **main**，内核 **6.12.94** | `kkstone/immortalwrt-ipq50xx` **openwrt-21.02**，内核 **5.4-QSDK** |
-| 交换栈 | 主线 **DSA**（`qca,qca8337` + `phy-handle` + `label`） | QSDK **swconfig**（`qcom,ess-switch-qca83xx` + `switch_*_bmp`） |
-| 维护状态 | 8 commits，最后一跑是 **37MB 失败日志**，无 Releases | **304 commits**，2026-10-02 仍在更新 |
-| WiFi | 开源 ath11k，**256MB 内存下上游直接把 wifi 置 disabled** | QSDK 闭源 WiFi + **Wi-Fi NSS / NAT NSS** + `CONFIG_ATH11K_MEM_PROFILE_256M=y` |
-| 设备定义 | workflow 里临时追加 `unicom_vs010` | 树里正式带 `cmcc_rax3000q` / `redmi_ax3000` / `xiaomi_cr881x` |
-
-**`kmod-qca-nss-dp` / `kmod-qca-nss-drv` / `kmod-qca-wifi-qsdk` 这些包，在 QSDK 21.02 树里是真实存在的**（RAX3000Q 的 `.config` 里 `CONFIG_PACKAGE_kmod-qca-nss-dp=y`、`CONFIG_ATH11K_NSS_SUPPORT=y` 全都有）。之前报"Package not found / empty variable name"，是因为把 QSDK 系的设备定义塞进了 OpenWrt main 6.12 树——**底座错了，不是包错了**。
-
-所以你的思路是对的：**VS010 该用 RAX3000Q 这套 5.4-QSDK 底座来编**，理由有三：
-
-1. 256MB 内存跑主线 ath11k 会 OOM，上游 RAX3000Q 的 DTS 里注释写死 `//256M RAM is too small for ath11k, so WiFi is disabled`；QSDK 闭源 WiFi + 256M MEM_PROFILE 反而能开 WiFi。
-2. VS010 原厂/NWRT 就是 QSDK 系，前几轮那份从 NWRT 反编译出来的 2321 行 DTS（`qcom,port_phyinfo` / `switch_lan_bmp`）**正好就是这套树的语法**，而 xiangye277 的 DSA DTS 在这里根本编不了。
-3. NSS 硬件转发能补上 IPQ5018 双核 A53 软转发弱的短板。
-
-⚠️ **但只能借底座和工程骨架，不能整套照搬固件**：上一轮已经核实过，RAX3000Q 固件直接刷 VS010 会因 RESET GPIO（23 vs 33）、端口映射、校准变体、ART 布局全不同而变砖。这次做的是"换底座 + 换设备层"，不是"刷 RAX3000Q 固件"。
-
----
-
-## 1. 你现在的仓库为什么编不出来
-
-`gggbin2026/vs010-openwrt` 与上游 `xiangye277/vs010-openwrt` **逐字节一致**（8 commits，最新 `7242549 · Jun 26 2026`，状态 failure）。`firmware/` 里两份都是失败日志：
-
-- `vs010-openwrt-firmware.zip` → `Makefile:41: *** empty variable name. Stop.`
-- `build.log`（37.5MB）→ `cc1: fatal error: ../dts/ipq5018-vs010.dts: No such file or directory` → `ERROR: target/linux failed to build.`
-
-外加 `make ... | tee` 没开 pipefail 导致 step 假成功。这些在上一轮 `xiangye277_修复包` 里已逐条诊断过。
-
-而换 QSDK 底座后，`IMAGE_SIZE := 59392k`（照抄 PZ-L8，超 VS010 的 `0x2840000=41472k`）、5G 频限砍掉 ch149~165、25 个插件塞进 256MB 这些问题**大部分自然消失**——QSDK 树用 UBI 自动按分区出镜像，闭源 WiFi 也不读 `ieee80211-freq-limit`。
-
----
-
-## 2. 交付文件与覆盖方法
-
-| 包内文件 | 覆盖到你的仓库 | 说明 |
-|---|---|---|
-| `.github/workflows/build-openwrt.yml` | **新增** | QSDK 底座版 workflow（P3TERX 骨架） |
-| `.config` | 覆盖 | 7267 行完整配置，从 RAX3000Q 版精确改设备符号 |
-| `diy-part1.sh` | 覆盖 | feeds 前置，保持 21.02 分支 |
-| `diy-part2.sh` | 覆盖 | **核心**：注入 VS010 的 DTS / 设备定义 / 02_network / caldata |
-| `feeds.conf.default` | 覆盖 | QSDK 树原版（4 个源全部 pin `openwrt-21.02`） |
-| `vs010/ipq5018-vs010.dts` | 新增 | QSDK 风格改写版（主选） |
-| `vs010/ipq5018-vs010-nwrt-dump.dts` | 新增 | NWRT 反编译硬件真值（兜底） |
-| `vs010/README_DTS.md` | 新增 | 两份 DTS 怎么切、三项待实测 |
-
-**必做一步**：把仓库里旧的 `.github/workflows/build.yml` **删掉或改名成 `build.yml.disabled`**。那份 clone 的是 OpenWrt main 6.12，和这套 QSDK 树不共存；两个 workflow 都在 `main` 分支 push 时触发会互相污染。`build-openwrt.yml` 已改成只 `workflow_dispatch` 手动触发。
-
-然后：**Fork → Actions → Build VS010 (QSDK 5.4) → Run workflow**，`use_nwrt_dump_dts` 首次留 `false`。
-
-预期产物（Artifact `VS010_QSDK_firmware_*`）：
-
-```
-*-cucc_vs010-squashfs-nand-factory.ubi     ← 首刷用这个
-*-cucc_vs010-squashfs-nand-sysupgrade.bin  ← 后续升级
-*-cucc_vs010-fit-uImage.itb
-```
-
----
-
-## 3. 相对 RAX3000Q 原件，改了哪些
-
-| 位置 | RAX3000Q 原值 | VS010 修复值 |
-|---|---|---|
-| `.config` | `DEVICE_cmcc_rax3000q=y` | `DEVICE_cucc_vs010=y` |
-| `.config` | `CONFIG_TARGET_PROFILE="DEVICE_cmcc_rax3000q"` | `"DEVICE_cucc_vs010"` |
-| `.config` | `ipq-wifi-cmcc_rax3000q=y` | **注释掉**（RAX3000Q 的 BDF 刷进 VS010，5G 校准必错）；改由 `11-ath11k-caldata` 从本机 `0:ART` 提取 |
-| `.config` | — | 加 `CONFIG_PACKAGE_iperf3=y` 便于验收 |
-| `.config` | `CONFIG_ATH11K_MEM_PROFILE_256M=y` / NSS 三项 | **保留**（正是这套底座的价值） |
-| workflow | `release_tag=RAX3000Q-...` | `VS010-...`；`UPLOAD_RELEASE=false` 首次不自动发版 |
-| workflow | `make -j$(nproc) \|\| make -j1 \|\| make -j1 V=s` | 改 `set -euo pipefail` + `tee build.log`，失败即停并传日志 |
-| workflow | golang/nodejs/natmap/ddns-go/frp/turboacc 一堆 Dropbox 外链 | **移除**（首次编译易碎）；只保留 QSDK 5.4 内核 tarball 兜底且允许失败 |
-| workflow | — | 加底座结构自检、`make defconfig` 后校验 `DEVICE_cucc_vs010` 是否真进 `.config` |
-| `image/Makefile` | 树里只有 3 台设备 | `diy-part2.sh` 追加 `define Device/cucc_vs010` |
-| DTS | `ipq5000-rax3000q.dts` | `ipq5018-vs010.dts`：GPIO 23→33、LED 3 色→1 颗 GPIO35、位图 `0x48/0x34/0x02`→`0x40/0x1e/0x00`、删 mesh 键 |
-| `02_network` | swconfig 三个 case | 追加 `cucc,vs010` case |
-| `11-ath11k-caldata` | 三个 board | 两处 case 都加 `cucc,vs010` |
-
-**为什么 `.config` 里不加 `IMAGE_SIZE`**：QSDK 树的 `cmcc_rax3000q` 定义本身就没有 `IMAGE_SIZE`，`Device/UbiFit` 用 `append-ubi` 按 DTS 的 SMEM 分区自动出镜像。但 **首刷前务必检查 `nand-factory.ubi` ≤ 0x2840000（41472k）**；超了就在 `diy-part2.sh` 的 `define Device/cucc_vs010` 里补一行 `IMAGE_SIZE := 41472k`。
-
----
-
-## 4. 三项必须首刷实测（诚实边界）
-
-这套修复解决的是**「让 Actions 真的编出 VS010 专用镜像」**，以下三项社区没有公开定论，不能替你打包票：
-
-1. **端口 ↔ RJ45 映射**：`02_network` 用的是按 `switch_lan_bmp=0x1e` 推的初值。首刷跑 `swconfig dev switch1 show` 逐个插网线确认，再改 `diy-part2.sh` 里那段。
-2. **ART 校准偏移**：借用 RAX3000Q 的 `0x1000` / `0x26800`。5G 起不来就用 `oem_extract/` 的 128K bdwlan 比对或调偏移。⚠️ `qcn6122_bdwlan.bin` 只有 50 字节、是 404 页面，**不能用**。
-3. **`board_id` 0x24 / 0x60**：沿用 RAX3000Q。ath11k 报找不到 board-2.bin 时按 `10-ath11k-board_id` 规则改。
-
-详见 `vs010/README_DTS.md`。若主选 DTS 网口不对，在 Actions 里把 `use_nwrt_dump_dts` 勾 `true` 换成 NWRT 反编译的硬件真值版。
-
----
-
-## 5. 刷机参数（和前面几轮都不同，别混）
-
-| 体系 | 参数 |
+| 项 | 值 |
 |---|---|
-| **本套 QSDK U-Boot** | 电脑设 `192.168.1.8`，**用 LAN1 口**（README 原文：`Set computer ip to:192.168.1.8, use LAN1 port.`） |
-| xiangye277 的 Web API | `http://192.168.2.1`，密码 `mzxgfwlpt00` base64 → stok → `/api/;stok=.../admin/advance/upgrade`，字段 `file` + `size` |
-| xiangye277 的 TTL | `10.1.1.1` / `10.1.1.2`，`tftpboot 0x44000000 firmware.img` → `flash rootfs 0x44000000 0xSIZE` |
-| NWRT TTL | `192.168.2.2`，`flash 0:MIBIB` / `0:APPSBL` / `flash rootfs` → `bootipq` |
+| 适用机型 | 中国联通 **CUCC VS010**（Unicom AX3000） |
+| 设备标识 | `cucc_vs010`（底座没有此机型，由本仓库 `diy-part2.sh` 注入） |
+| 固件文件 | `QSDK-...-squashfs-nand-factory.ubi`（刷机 / 救砖）；`...-sysupgrade.bin` 用于系统内升级 |
+| **管理 IP** | **AP 主端 `192.168.1.2` / STA 客户端 `192.168.1.3`**，`/24`，挂在 `br-lan` |
+| 角色分配 | MAC 尾数奇数 = AP、偶数 = STA；`bridge-role ap` / `bridge-role sta` 可改 |
+| DHCP | 默认**开**（池 `192.168.1.100–199` / 12h）；`bridge-dhcp off` 关回纯透传 |
+| IPv6 | 默认**开**（LAN ULA + RA / DHCPv6）；`bridge-ipv6 off` 关 |
+| 默认 WiFi | SSID `QSDK-BRIDGE` / 密钥 `bridge-500m-change-me`（**多对链路务必改 SSID 与密钥**） |
+| 默认账号 | `root` / 空密码（首次登录请设密码） |
+| 时区 · 无线国别 | `Asia/Shanghai`（CST-8）· **全部射频 `country=CN`** |
+| 内核 | **Linux 5.4**（QSDK 5.4 分支，实测 `5.4.164`） |
+| QSDK 基线 | **NHSS.QSDK.11.5.0.5** |
+| 架构 | 32 位 ARM（`arm_cortex-a7+neon-vfpv4`） |
+| 版本标识 | 无 `v1.0` 式版本号，以 Release tag `fw-YYYYMMDD-HHMMSS-rN`（上海时间）为准 |
+| 开源性 | **混合：构建源码开源，但含高通闭源二进制**（见下） |
 
-**铁律**：TTL 115200 8N1，**只接 TX/RX/GND，别碰 1.8V**；刷前备份全部分区，**特别是 `0:ART`**（射频校准丢了 5G 救不回来）；绝不刷 `0:MIBIB` / `0:APPSBL` 全分区包（RESET GPIO 不同会无限重启，只能编程器救）。2021 年 V2.0 板最稳，新批次有刷完无 5G 的案例。
+> 容易混淆的地址：`192.168.1.8` 是刷机时**电脑**该设的 IP（部分 U-Boot）；`192.168.2.1` 是 **VS010 原厂固件**的页面，不是本固件地址；`192.168.1.1` 是本固件早期版本默认地址，已不再使用。
 
----
+## 机器硬件
 
-## 6. 两条互斥的路线，选一条别混
+| 部件 | 型号 |
+|---|---|
+| SoC | Qualcomm **IPQ5018** 双核 A53 @ 1 GHz |
+| 内存 | 256 MB DDR3L |
+| 闪存 | 128 MB SPI-NAND（**F5D01G41LB**） |
+| 5G WiFi | QCN6102 2×2，802.11ax |
+| 2.4G WiFi | IPQ5018 内置 |
+| 交换芯片 | **QCA8337-AL3C**（QSDK `qca-ssdk` / `ess-switch`，非主线 DSA） |
+| 网口 | 1×WAN + 3×LAN 千兆 |
 
-- **本包（QSDK 5.4 + NSS）**：WiFi/转发最可能可用，内存友好；代价是 swconfig 下 `ethtool` 仍可能不上报速率（**只是显示问题**，`swconfig`/iperf3 才是准的），且端口映射要实测。
-- **上一轮 `xiangye277_修复包`（OpenWrt main 6.12 + DSA）**：网口能正确上报速率，但 256MB 下 ath11k 有 OOM 风险、上游自己都把 WiFi 禁了，还有 #25975 以太网回归。
+固件只把 LAN 口并进 `br-lan`；**WAN 口闲置，未并入桥**。
+VS010 的 `02_network` 端口映射是参照 PZ-L8 推的初值，**首刷请四个 RJ45 口逐个插线核对**。
 
-**不要**把上一轮的 DSA DTS 塞进这套 QSDK 树，也不要把本包的 `.config` 拿去给 main 树用——这正是前几轮反复报错的根源。
+## 这个固件做了什么
 
----
+1. **开机自动成桥**：按 MAC 尾数分 AP / STA，写死管理 IP `.2` / `.3`，不做 NAT、防火墙全放行、`br-lan` 开 STP。
+2. **WDS 4addr + NSS 硬件转发**：保留底座 4 个 QSDK WDS offload 补丁（149 / 211-002 / 216 / 330）；5G 锁 `ch149`、WPA2-AES、`wds=1`、`distance=550`。
+3. **补上底座缺失的 VS010 设备层**：注入 `Device/cucc_vs010`（插在 `BuildImage` 之前，否则 Kconfig 设备符号会丢）、DTS、`02_network`、`11-ath11k-caldata`（从本机 `0:ART` 提校准，不用别的机器 BDF）。
+4. **修网口 probe（本机型关键）**：`use_nwrt_dump_dts` 默认 `true`，使用从 VS010 实物 `/sys/firmware/fdt` 反编译的硬件真值 DTS —— 含 **22 个 `clock-names` + 6 个 `reset-names`**，缺了它们 `ess-switch` 不 probe，表现就是「能进系统但 `ip link` 无 ethX、四个网口插哪个都没反应」。
+5. **修网口速率显示**：自写 `nss-dp` 的 `get_link_ksettings` 补丁（已修掉早期 `cmd->base.mdix` 字段错误），`ethtool eth0` 报 `1000Mb/s / Full`。
+6. **NAND 兼容 / 编译期修复**：扩展底座 `421` 补丁补 GD5Fx ID；打开 `MAC80211_DEBUGFS` + `MAC80211_MESH`；预取 `ath-kernel` 私有 tarball 防下载断流；锁死 `kmod-qca-ssdk-nohnat` 等 5 个网卡驱动并在编译期硬校验。
+7. **运行期自检**：`nic-guard` 开机把 `ip link` / `swconfig list` / `dmesg` 真因打到串口，`br-lan` 起不来时给 `ethX` 临时配 `192.168.1.9/24` 供 SSH 急救。
+8. **本地化与发布**：上海时区、全射频 CN、固件名统一 `QSDK-` 前缀、每次编译自动建带时间戳的 Release（默认全部永久保留，至少 5 次）。
 
-## 7. 最后一句
+## 开源还是闭源
 
-如果只是要把那条 **500 米网桥**跑起来：RAX3000M 官方 OpenWrt 免 TTL、前面的 WDS 脚本现成能用，仍然比修 VS010 省事得多。VS010 这套更适合当"把 QSDK 树玩通"的练手——30 块的板子，坏了不心疼。
+**混合，不是纯开源固件，也不是官方固件。**
 
-`diy-part2.sh` 已在本地模拟的 QSDK 源码树上实跑过：4 处注入全部成功，`02_network` / `11-ath11k-caldata` 均通过 `sh -n`，生成 DTS 的 `{}` / `<>` / `#ifndef~#endif` 全部配平。但**真实 `make` 仍需你在 Actions 里跑一次**——当前会话只有 362MB 磁盘 / 2.4GB 内存 / 2 核，且缺 flex/bison/dtc 等依赖，跑不了全量编译。
+- **开源部分**：OpenWrt / ImmortalWrt 用户态、Linux 内核主体、本仓库全部 `.config`、脚本、`vs010/` DTS、`files/`、workflow，按 GPL-2.0 / MIT 风格公开，可自行编译复现。
+- **闭源二进制**：高通 QSDK 的 WiFi 驱动（ath11k QSDK 分支）、NSS 固件 `qca-nss-fw-ipq50xx-retail`、QCA8337 交换相关初始化数据、从本机 `0:ART` 提取的射频校准 BDF —— 以 blob 形式随底座引入，**没有源码**。
+
+所以能自己编译、能改配置，但**无法 100% 从源码重建相同二进制**。本仓库 fork 自 `xiangye277/vs010-openwrt`（那是 6.x + DSA 路线），现已改为 5.4-QSDK + swconfig 路线，两套交换栈互斥；仓库里若残留旧 `firmware/`、`oem_extract/`、根目录 DSA 版 DTS，**都不参与本编译**，尤其 `qcn6122_bdwlan.bin` 只有几十字节是 404 页面，别当 BDF 用。
+
+## 版本号与内核
+
+- 没有语义化版本号。每次成功编译生成一个独立 Release，例如 `fw-20261121-140642-r8` = 上海时间 2026-11-21 14:06:42、第 8 次 run；所有 Release 永久保留。
+- 系统内查真实值：`uname -r`、`cat /etc/openwrt_release`。
+- 底座 `kkstone/immortalwrt-ipq50xx @ openwrt-21.02`，内核 **Linux 5.4 / QSDK 5.4（5.4.164）**，QSDK **NHSS.11.5.0.5**，32 位 ARM。
+- 与恩山那类 **OpenWrt 25.12 / Linux 6.12 + 开源 NSS** 固件是不同路线：那个要 64 位不死 U-Boot、默认 `20.0.0.1`，且**目前没有 VS010 适配**，不能与本固件互刷。
+
+## 刷机与验收
+
+**刷机**：用 `QSDK-*-nand-factory.ubi` 进不死 U-Boot web 刷。
+TTL 串口只接 **TX / RX / GND，别碰 1.8V**；动手前**先备份 `0:ART`**。
+`192.168.2.1` 是原厂固件页面（原厂 `.img` 走 Web API），不代表能刷本 UBI；首次刷建议 TTL 在手。开机等 1–3 分钟。
+
+```sh
+nic-guard                                 # 网卡 / 交换芯片自检，VS010 必看
+swconfig list                             # 空 = 交换芯片没注册
+ip link                                   # 不带 grep，别漏掉 eth2 / eth3
+bridge-status                             # 角色 / 4addr / STP / 管理 IP
+date                                      # 应显示 CST
+uci show wireless | grep country          # 每个射频都是 CN
+ethtool eth0 | grep -E 'Speed|Duplex'     # 1000Mb/s / Full
+iperf3 -c <对端PC> -P 4 -t 60 -O 3        # 900M+ 才是真千兆
+```
+
+**若 `nic-guard` 报「内核里没有任何 ethX」**：这是交换驱动 probe 失败（DTS 缺时钟 / 复位），用户态命令修不了。确认 workflow 里 `use_nwrt_dump_dts = true` 后重编。
+**TTL 还能敲命令 = 没砖**，U-Boot web 仍可重刷 `factory.ubi`；别拆机、别上编程器。
+
+- 两端在同一广播域时**只留一个 DHCP**（`bridge-dhcp off` 关掉副端）；上游已有主路由发地址则两端都关。
+- WiFi 的 `iw station dump` bitrate 可能显示 N/A（NSS offload 不回灌统计），**以 `iperf3` 为准**。
+
+## 历史 Release 差异（重要）
+
+本仓库 2026-11-21 早的 `fw-...-r8` 等旧固件与当前源码**不同**：
+
+| | 旧 Release（r8 等） | 当前源码 |
+|---|---|---|
+| 固件名前缀 | `immortalwrt-` | **`QSDK-`** |
+| IPv6 / DHCP | 全关，电脑需手动设 `192.168.1.10` | 默认开，可用命令关 |
+| VS010 DTS | QSDK 模板改写版（缺时钟/复位） | **NWRT 硬件真值 DTS，默认启用** |
+| 网卡加固 / 自检 | 无 | 有（锁 5 驱动 + `nic-guard`） |
+| 管理 IP | 同为 `.2` / `.3` | 同为 `.2` / `.3` |
+
+> 旧版刷进去后「能进系统但插网线没反应」就是 DTS 那一行造成的；**重编后重刷即可，机器没坏**。
+
+## 风险与边界
+
+- 非官方固件，首次刷有变砖风险；TTL 与 `0:ART` 备份是底线。
+- **不含 TDMA / airMAX / 对准灯 / 一键配对**；TDMA 是 UBNT 私有 MAC 协议，无法编进本套 5.4-QSDK 开源栈，且 500 m 单跳点对点开 TDMA 反而掉吞吐。
+- 多台同时开机时默认 SSID / 密钥相同会让 STA 乱关联 —— 改密钥、多对链路各用不同 SSID，或给客户端锁 `bssid`。
+- 跨机型（VS010 ↔ RAX3000Q）混搭 WDS 未实测；建议同型号成对使用。
+- 端口 → RJ45 丝印映射是推的初值，**首刷逐个插线核对**；若 `swconfig list` 显示的设备名不是 `switch1`，`02_network` 要按实际名字改。
+
+## 相关命令速查
+
+```sh
+bridge-role ap|sta          # 改主端 / 客户端
+bridge-dhcp on|off|status   # DHCP 开关
+bridge-ipv6 on|off|status   # IPv6 RA / DHCPv6 开关
+bridge-distance 550         # 改 ACK 距离
+bridge-status               # 一屏看全
+portstat                    # swconfig 真实端口状态
+nic-guard                   # 网卡自检 + 急救地址
+```

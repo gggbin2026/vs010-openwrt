@@ -1,0 +1,26 @@
+#!/bin/sh
+# bridge-ipv6 —— 随手开关 LAN 侧 IPv6（不重刷、不重编）
+#   on   : RA / DHCPv6 / NDP = server，odhcpd 开机自启
+#   off  : 三项全 disabled，odhcpd 停掉（回到上一版的纯 IPv4 桥）
+#   status: 打印当前状态
+case "$1" in
+    on)  uci -q set network.lan.ip6assign='60'
+         uci set dhcp.lan.ra='server'
+         uci set dhcp.lan.dhcpv6='server'
+         uci set dhcp.lan.ndp='server'
+         uci commit network; uci commit dhcp
+         [ -x /etc/init.d/odhcpd ] && { /etc/init.d/odhcpd enable; /etc/init.d/odhcpd restart; }
+         echo "✓ IPv6 LAN 侧已开（RA/DHCPv6/NDP = server）";;
+    off) uci set dhcp.lan.ra='disabled'
+         uci set dhcp.lan.dhcpv6='disabled'
+         uci set dhcp.lan.ndp='disabled'
+         uci -q delete network.lan.ip6assign
+         uci commit network; uci commit dhcp
+         [ -x /etc/init.d/odhcpd ] && { /etc/init.d/odhcpd stop 2>/dev/null || true; /etc/init.d/odhcpd disable 2>/dev/null || true; }
+         echo "✓ IPv6 LAN 侧已关（内核栈仍在，只是不发地址）";;
+    status)
+         echo "ra=$(uci -q get dhcp.lan.ra)  dhcpv6=$(uci -q get dhcp.lan.dhcpv6)  ndp=$(uci -q get dhcp.lan.ndp)"
+         echo "ip6assign=$(uci -q get network.lan.ip6assign)"
+         echo "kernel IPv6: $(grep -c '^CONFIG_IPV6=y' /etc/config/.config 2>/dev/null || echo '编译期决定')";;
+    *)   echo "用法: bridge-ipv6 {on|off|status}";;
+esac
