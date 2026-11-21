@@ -3,10 +3,10 @@
 # 底座: kkstone/immortalwrt-ipq50xx @ openwrt-21.02 (5.4-QSDK + swconfig + NSS)
 #
 # 相对上一版（VS010_QSDK_修复包）的变化：
-#   * .config 330 包 / IPv6 全开 -> 137 包 / IPv6 从内核到配置面全关
+#   * .config 330 包 / IPv6 编译期关 -> 137 包 / IPv6 从内核到配置面全关
 #   * 新增 defconfig -> slim -> defconfig 三段收敛 + 硬校验
 #   * 新增 nss-dp ethtool 补丁注入 + 编译后确认（修网口速率显示）
-#   * 新增 files/ 网桥就绪脚本（STP / 防火墙全放行 / IPv6·DHCP 开关）
+#   * 新增 files/ 网桥就绪脚本（STP / 防火墙全放行 / DHCP 开关）
 #   * 产物固件文件名统一以 QSDK- 开头，自动发布到 Releases
 #   * 删掉 Generate release tag / Upload firmware to release 两步
 #   * 加 permissions / pipefail / 产物强校验 / 失败也传日志
@@ -178,11 +178,10 @@ jobs:
           || { echo "::error::256M 内存优化丢失（WiFi 会 OOM）"; exit 1; }
         grep -E '^CONFIG_ATH11K_NSS_SUPPORT=y' .config \
           || echo "::warning::NSS WiFi 未启用"
-        if ! grep -q '^CONFIG_IPV6=y' .config || ! grep -q '^CONFIG_KERNEL_IPV6=y' .config; then
-          echo "::error::IPv6 被 slim/defconfig 摁回去了（本版要求开启）"; grep -E '^CONFIG_(IPV6|KERNEL_IPV6)' .config; exit 1
-        fi
-        if ! grep -q '^CONFIG_PACKAGE_odhcpd-ipv6only=y' .config; then
-          echo "::warning::odhcpd-ipv6only 未启用，RA/DHCPv6 不会生效"
+        # 2026-11-21：IPv6 编译期开启会触发 QSDK 5.4 ECM 的 BUG_ON panic，
+        # 本版必须关闭；被 defconfig 拉回就立即停，不白跑一小时编译。
+        if grep -q '^CONFIG_IPV6=y' .config || grep -q '^CONFIG_KERNEL_IPV6=y' .config; then
+          echo "::error::IPv6 被拉回（本版编译期必须关闭，否则开机 30s kernel panic）"; grep -E '^CONFIG_(IPV6|KERNEL_IPV6)' .config; exit 1
         fi
         if ! grep -q '^CONFIG_PACKAGE_MAC80211_DEBUGFS=y' .config; then
           echo "::error::MAC80211_DEBUGFS 被关掉 —— QSDK 11.5 ath11k 会报 'struct ath11k has no member named debug'"; exit 1
@@ -193,7 +192,7 @@ jobs:
         if ! grep -q '^CONFIG_PACKAGE_MAC80211_MESH=y' .config; then
           echo "::error::MAC80211_MESH 被关掉 —— QSDK 11.5 的 debug_nss.c / debugfs_sta.c 会引用 mesh 成员与函数而编译失败"; exit 1
         fi
-        echo "  ✓ 设备 / 256M / NSS / IPv6(开) / BDF 全部符合预期"
+        echo "  ✓ 设备 / 256M / NSS / IPv6(关) / BDF 全部符合预期"
 
     - name: Verify NIC drivers & switch DTS
       run: |
@@ -341,7 +340,7 @@ jobs:
           echo "- Commit：${{ github.sha }}"
           echo "- Run：#${{ github.run_number }} / attempt ${{ github.run_attempt }}"
           echo "- 内容：上海时区 CST-8 / 全射频 CN / ethtool 1000M-Full / NAND 421 / MESH+DEBUGFS / UBNT 开机成桥 / 网卡加固自检"
-          echo "- IPv6 / DHCP 默认开（bridge-ipv6 off / bridge-dhcp off 可关回纯透传）"
+          echo "- IPv6 编译期关闭（QSDK 5.4 ECM 稳定性）；DHCP 默认开，bridge-dhcp off 可关回纯透传"
           echo "- 管理 IP：AP-WDS 192.168.1.2 / STA-WDS 192.168.1.3；固件文件名前缀 QSDK-"
           echo "- VS010 使用 NWRT 硬件真值 DTS（22 时钟 / 6 复位）修交换芯片 probe"
           echo "- 刷机：QSDK-*-nand-factory.ubi；TTL 只接 TX/RX/GND，先备份 0:ART"
