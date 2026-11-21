@@ -1,0 +1,65 @@
+--- a/nss_dp_ethtools.c
++++ b/nss_dp_ethtools.c
+@@ -102,6 +102,53 @@
+ }
+ #endif
+ 
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
++/*
++ * nss_dp_get_link_ksettings()
++ *	Report link settings for NSS-DP virtual data-plane interfaces.
++ *
++ * Upstream wires .get_link_ksettings straight to
++ * phy_ethtool_get_link_ksettings(), which dereferences netdev->phydev.
++ * NSS-DP keeps its PHY in dp_priv->phydev and leaves netdev->phydev NULL,
++ * so the helper returns -ENODEV and ethtool / LuCI fall back to
++ * "Speed: Unknown! / Duplex: Half".  CPU (fixed-link) ports have no PHY
++ * at all and are hardwired to 1000M full-duplex by the board DTS.
++ *
++ * Only speed/duplex/port/phy_address/autoneg are touched: these fields exist
++ * in every 5.4-era struct ethtool_link_settings.  Do NOT use mdix /
++ * eth_tp_mdix / eth_tp_mdix_ctrl here -- QSDK 5.4 variants differ, and
++ * the mdix shorthand does not exist at all (build error in run #1).
++ * This only affects reporting; the data path is untouched.
++ */
++static int nss_dp_get_link_ksettings(struct net_device *netdev,
++				     struct ethtool_link_ksettings *cmd)
++{
++	struct nss_dp_dev *dp_priv = (struct nss_dp_dev *)netdev_priv(netdev);
++
++	ethtool_link_ksettings_zero_link_mode(cmd, supported);
++	ethtool_link_ksettings_zero_link_mode(cmd, advertising);
++	ethtool_link_ksettings_zero_link_mode(cmd, lp_advertising);
++
++	cmd->base.port = PORT_MII;
++	cmd->base.phy_address = 0;
++	cmd->base.autoneg = AUTONEG_DISABLE;
++
++	if (dp_priv->phydev && dp_priv->phydev->speed) {
++		cmd->base.speed = dp_priv->phydev->speed;
++		cmd->base.duplex = dp_priv->phydev->duplex;
++		cmd->base.autoneg = dp_priv->phydev->autoneg;
++	} else {
++		/* fixed-link CPU port: 1000M / full, see ipq50xx DTS */
++		cmd->base.speed = SPEED_1000;
++		cmd->base.duplex = DUPLEX_FULL;
++	}
++
++	ethtool_link_ksettings_add_link_mode(cmd, supported, 1000baseT_Full);
++	ethtool_link_ksettings_add_link_mode(cmd, advertising, 1000baseT_Full);
++	return 0;
++}
++#endif
++
+ /*
+  * nss_dp_get_pauseparam()
+  */
+@@ -372,7 +419,7 @@
+ 	.get_settings = &nss_dp_get_settings,
+ 	.set_settings = &nss_dp_set_settings,
+ #else
+-	.get_link_ksettings = phy_ethtool_get_link_ksettings,
++	.get_link_ksettings = &nss_dp_get_link_ksettings,
+ 	.set_link_ksettings = phy_ethtool_set_link_ksettings,
+ #endif
+ 	.get_pauseparam = &nss_dp_get_pauseparam,

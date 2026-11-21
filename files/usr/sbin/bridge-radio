@@ -1,0 +1,14 @@
+#!/bin/sh
+# 极少数机器 5G 不是 radio1 时，手动指定后重新应用角色
+#   bridge-radio radio0   然后  bridge-role ap  或  bridge-role sta
+r="$1"
+case "$r" in
+    radio0|radio1|radio2)
+        uci -q get "wireless.$r" >/dev/null || { echo "没有 $r 这个射频" >&2; exit 1; }
+        printf '%s\n' "$r" > /etc/bridge_radio
+        echo "✓ 5G 射频锁定为 $r，请再执行一次 bridge-role <ap|sta>";;
+    auto|'')
+        rm -f /etc/bridge_radio
+        echo "✓ 已清除手动射频，恢复自动探测";;
+    *) echo "用法: bridge-radio {radio0|radio1|radio2|auto}" >&2; exit 1;;
+esac
