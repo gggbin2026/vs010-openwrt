@@ -2,7 +2,7 @@
 # 首次开机执行一次：把机器收拾成「WDS 网桥就绪」状态
 #   * 系统时区 = 上海 (CST-8 / Asia/Shanghai)
 #   * 所有无线射频国家码 = CN（2.4G + 5G，不依赖段名）
-#   * IPv6 全开（RA/DHCPv6/NDP）/ 开 STP / 防火墙全放行
+#   * IPv6 编译期关闭（不配 RA/DHCPv6/NDP）/ 开 STP / 防火墙全放行
 # 本版 DHCP 默认开；两台同网段时在其中一台执行 bridge-dhcp off
 . /lib/functions.sh
 
@@ -39,19 +39,11 @@ elif [ -x /usr/sbin/iw ]; then
     /usr/sbin/iw reg set CN 2>/dev/null || true
 fi
 
-# ── 3. IPv6 配置面：本版全开 ──────────────────────────────
-# 编译层已开 CONFIG_IPV6 / CONFIG_KERNEL_IPV6；这里开 LAN 侧
-# RA / DHCPv6 / NDP，让 odhcpd 正常发 ULA 地址。
-# 不做 IPv6 上网：wan 仍是 proto=none 的纯二层桥，没有 wan6。
-# 想随手关： bridge-ipv6 off
-uci -q set network.lan.ip6assign='60'
-uci set dhcp.lan.ra='server'
-uci set dhcp.lan.dhcpv6='server'
-uci set dhcp.lan.ndp='server'
-if [ -x /etc/init.d/odhcpd ]; then
-    /etc/init.d/odhcpd enable 2>/dev/null || true
-    /etc/init.d/odhcpd restart 2>/dev/null || true
-fi
+# ── 3. IPv6：本版编译期关闭，不做任何 IPv6 配置 ──────────────
+# 2026-11-21 回退：CONFIG_IPV6 / CONFIG_KERNEL_IPV6 / ip6tables / nat6 /
+# conntrack6 / odhcpd 全部不编入。原因是 QSDK 5.4 的 qca-nss-ecm 在
+# IPv6 + 网桥组合下会触发内核 BUG_ON → 30s panic → 3s 重启循环。
+# 内核没有 IPv6 栈时，写 ip6assign / ra / dhcpv6 只会留下无效配置。
 # ── 4. 二层桥接：开 STP，关掉用不上的 NAT/防火墙过滤 ──
 uci set network.lan.stp='1'
 uci set network.lan.force_link='1'
@@ -66,7 +58,7 @@ fi
 uci commit network
 uci commit dhcp
 
-# ── 5. 本版 DHCP / odhcpd 均保持开机自启（要关用 bridge-dhcp off / bridge-ipv6 off）──
+# ── 5. 本版 DHCP 保持开机自启（要关用 bridge-dhcp off）──
 
 # uci-defaults 执行完删掉自己，避免每次重启重复改
 rm -f /etc/uci-defaults/99-bridge-ready

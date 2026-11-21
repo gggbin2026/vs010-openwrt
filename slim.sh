@@ -1,7 +1,7 @@
 #!/bin/bash
 # 在第一次 `make defconfig` 之后执行（工作目录 = openwrt/）。
 # defconfig 会按 target 的 DEFAULT_PACKAGES / 依赖把插件拉回，
-# 这里做二次收敛（IPv6 本版保持开启），然后再跑一次 defconfig 定型。
+# 这里做二次收敛（IPv6 本版编译期关闭），然后再跑一次 defconfig 定型。
 set -euo pipefail
 [ -f .config ] || { echo "::error::找不到 .config（请在 openwrt/ 目录下运行）"; exit 1; }
 cp .config .config.before-slim
@@ -17,7 +17,6 @@ BEGIN {
         "iw iwinfo wireless-regdb wpad-basic-wolfssl hostapd-common " \
         "qca-nss-fw-ipq50xx-retail swconfig ethtool iperf3 " \
         "MAC80211_MESH MAC80211_DEBUGFS MAC80211_NSS_SUPPORT " \
-        "odhcp6c odhcpd-ipv6only luci-proto-ipv6 ip6tables " \
         "kmod-qca-ssdk-nohnat kmod-qca-nss-dp kmod-qca-nss-drv " \
         "qca-nss-fw-ipq50xx-retail swconfig", a, " ")
   for (i in a) allow[a[i]]=1
@@ -41,7 +40,7 @@ for n in \
   ath11k-firmware-ipq5018 ath11k-firmware-qcn6122 \
   iw iwinfo wireless-regdb wpad-basic-wolfssl hostapd-common \
   qca-nss-fw-ipq50xx-retail kmod-qca-nss-dp kmod-qca-nss-drv \
-  swconfig ethtool iperf3 odhcp6c odhcpd-ipv6only luci-proto-ipv6 ip6tables \
+  swconfig ethtool iperf3 \
   kmod-qca-ssdk-nohnat kmod-qca-nss-dp kmod-qca-nss-drv \
   qca-nss-fw-ipq50xx-retail ; do
   k="CONFIG_PACKAGE_$n"
@@ -60,8 +59,6 @@ for kv in \
   "CONFIG_PACKAGE_MAC80211_DEBUGFS=y" \
   "CONFIG_PACKAGE_MAC80211_MESH=y" \
   "CONFIG_TARGET_ROOTFS_SQUASHFS=y" \
-  "CONFIG_IPV6=y" \
-  "CONFIG_KERNEL_IPV6=y" \
   "CONFIG_PACKAGE_kmod-qca-ssdk-nohnat=y" \
   "CONFIG_PACKAGE_kmod-qca-nss-dp=y" \
   "CONFIG_PACKAGE_kmod-qca-nss-drv=y" \
@@ -77,9 +74,18 @@ if grep -q '^CONFIG_PACKAGE_ipq-wifi-cmcc_rax3000q=y' .config; then
   sed -i 's|^CONFIG_PACKAGE_ipq-wifi-cmcc_rax3000q=y|# CONFIG_PACKAGE_ipq-wifi-cmcc_rax3000q is not set|' .config
 fi
 
+# ── 强制关闭 IPv6 编译期栈 ─────────────────────────────────────
+# 2026-11-21：开启 CONFIG_IPV6 + ip6tables/nat6/conntrack6 后，
+# QSDK 5.4 的 qca-nss-ecm 在首次开机约 30s 触发 BUG_ON（e7f001f2）
+# → Kernel panic → 3 秒后自动重启，无限循环。回到已验证可启动的配置。
+for k in CONFIG_IPV6 CONFIG_KERNEL_IPV6; do
+  sed -i "s|^$k=y$|# $k is not set|" .config
+  grep -q "^# $k is not set$" .config || echo "# $k is not set" >> .config
+done
+
 echo "[slim] 精简前 =y 包: $(grep -c '^CONFIG_PACKAGE_.*=y$' .config.before-slim || true)"
 echo "[slim] 精简后 =y 包: $(grep -c '^CONFIG_PACKAGE_.*=y$' .config || true)"
-echo "[slim] IPv6: CONFIG_IPV6=$(grep -c '^CONFIG_IPV6=y$' .config || true) / KERNEL_IPV6=$(grep -c '^CONFIG_KERNEL_IPV6=y$' .config || true)"
+echo "[slim] IPv6: 编译期关闭 (CONFIG_IPV6 / CONFIG_KERNEL_IPV6 均 not set)"
 echo "[slim] luci-app =y: $(grep -c '^CONFIG_PACKAGE_luci-app-.*=y$' .config || true)"
 
 # ── 网卡/交换驱动兜底（加固）────────────────────────────────────

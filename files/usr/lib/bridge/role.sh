@@ -1,7 +1,7 @@
 #!/bin/sh
 # bridge_apply_role <ap|sta>
 # 把整机刷成 UBNT airOS「Bridge 模式」等价行为：
-#   纯二层透明桥（无 NAT）+ 一条 5G WDS(4addr) 链路；DHCP/IPv6 默认开
+#   纯二层透明桥（无 NAT）+ 一条 5G WDS(4addr) 链路；DHCP 默认开 / IPv6 编译期关闭
 # 两端共用这一段，只差 mode 与管理 IP。开机由 99-zz-bridge-role 调用。
 . /lib/functions.sh
 
@@ -94,18 +94,13 @@ bridge_apply_role() {
     uci -q delete network.lan.gateway
     uci -q delete network.lan.dns
 
-    # ── 4. 本版默认：DHCP + IPv6(RA/DHCPv6/NDP) 全开 ──
+    # ── 4. 本版默认：DHCP 开；IPv6 编译期关闭，不配 RA/DHCPv6 ──
     #     两台同广播域会双 DHCP，在其中一台执行  bridge-dhcp off
-    #     IPv6 不想跑就   bridge-ipv6 off
     uci set dhcp.lan.ignore='0'
     uci -q set dhcp.lan.start='100'
     uci -q set dhcp.lan.limit='100'
     uci -q set dhcp.lan.leasetime='12h'
-    uci set dhcp.lan.ra='server'
-    uci set dhcp.lan.dhcpv6='server'
-    uci set dhcp.lan.ndp='server'
     [ -x /etc/init.d/dnsmasq ] && { /etc/init.d/dnsmasq enable 2>/dev/null || true; /etc/init.d/dnsmasq restart 2>/dev/null || true; }
-    [ -x /etc/init.d/odhcpd ] && { /etc/init.d/odhcpd enable 2>/dev/null || true; /etc/init.d/odhcpd restart 2>/dev/null || true; }
 
     # ── 5. 防火墙全放行，不做 NAT ──
     if uci -q get firewall.@defaults[0] >/dev/null; then

@@ -14,7 +14,7 @@
 | **管理 IP** | **AP 主端 `192.168.1.2` / STA 客户端 `192.168.1.3`**，`/24`，挂在 `br-lan` |
 | 角色分配 | MAC 尾数奇数 = AP、偶数 = STA；`bridge-role ap` / `bridge-role sta` 可改 |
 | DHCP | 默认**开**（池 `192.168.1.100–199` / 12h）；`bridge-dhcp off` 关回纯透传 |
-| IPv6 | 默认**开**（LAN ULA + RA / DHCPv6）；`bridge-ipv6 off` 关 |
+| IPv6 | **编译期关闭**（5.4-QSDK 的 `qca-nss-ecm` 与 IPv6 组合会触发内核 `BUG_ON` panic）；`bridge-ipv6` 仅作状态提示 |
 | 默认 WiFi | SSID `QSDK-BRIDGE` / 密钥 `bridge-500m-change-me`（**多对链路务必改 SSID 与密钥**） |
 | 默认账号 | `root` / 空密码（首次登录请设密码） |
 | 时区 · 无线国别 | `Asia/Shanghai`（CST-8）· **全部射频 `country=CN`** |
@@ -98,7 +98,7 @@ iperf3 -c <对端PC> -P 4 -t 60 -O 3        # 900M+ 才是真千兆
 | | 旧 Release（r8 等） | 当前源码 |
 |---|---|---|
 | 固件名前缀 | `immortalwrt-` | **`QSDK-`** |
-| IPv6 / DHCP | 全关，电脑需手动设 `192.168.1.10` | 默认开，可用命令关 |
+| IPv6 / DHCP | 全关，电脑需手动设 `192.168.1.10` | IPv6 编译期关 / DHCP 默认开，可关 |
 | VS010 DTS | QSDK 模板改写版（缺时钟/复位） | **NWRT 硬件真值 DTS，默认启用** |
 | 网卡加固 / 自检 | 无 | 有（锁 5 驱动 + `nic-guard`） |
 | 管理 IP | 同为 `.2` / `.3` | 同为 `.2` / `.3` |
@@ -118,7 +118,7 @@ iperf3 -c <对端PC> -P 4 -t 60 -O 3        # 900M+ 才是真千兆
 ```sh
 bridge-role ap|sta          # 改主端 / 客户端
 bridge-dhcp on|off|status   # DHCP 开关
-bridge-ipv6 on|off|status   # IPv6 RA / DHCPv6 开关
+bridge-ipv6 status          # IPv6 状态提示（本版编译期关闭，无法开启）
 bridge-distance 550         # 改 ACK 距离
 bridge-status               # 一屏看全
 portstat                    # swconfig 真实端口状态
