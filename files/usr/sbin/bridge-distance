@@ -1,9 +1,0 @@
-#!/bin/sh
-# 按实际距离设 ACK 超时；每端都要设，建议 = 实际米数 × 1.1
-d="$1"
-case "$d" in ''|*[!0-9]*) echo "用法: bridge-distance 550   （当前 $(uci -q get wireless.radio1.distance 2>/dev/null)）" >&2; exit 1;; esac
-for r in radio0 radio1 radio2; do
-    uci -q get "wireless.$r" >/dev/null && uci set "wireless.$r.distance"="$d"
-done
-uci commit wireless
-echo "✓ distance=$d，执行 wifi reload 生效"
