@@ -40,7 +40,7 @@ for n in \
   ath11k-firmware-ipq5018 ath11k-firmware-qcn6122 \
   iw iwinfo wireless-regdb wpad-basic-wolfssl hostapd-common \
   qca-nss-fw-ipq50xx-retail kmod-qca-nss-dp kmod-qca-nss-drv \
-  swconfig ethtool iperf3 \
+  swconfig ethtool iperf3 luci-theme-argon \
   kmod-qca-ssdk-nohnat kmod-qca-nss-dp kmod-qca-nss-drv \
   qca-nss-fw-ipq50xx-retail ; do
   k="CONFIG_PACKAGE_$n"
@@ -59,6 +59,7 @@ for kv in \
   "CONFIG_PACKAGE_MAC80211_DEBUGFS=y" \
   "CONFIG_PACKAGE_MAC80211_MESH=y" \
   "CONFIG_TARGET_ROOTFS_SQUASHFS=y" \
+  "CONFIG_PACKAGE_luci-theme-argon=y" \
   "CONFIG_PACKAGE_kmod-qca-ssdk-nohnat=y" \
   "CONFIG_PACKAGE_kmod-qca-nss-dp=y" \
   "CONFIG_PACKAGE_kmod-qca-nss-drv=y" \

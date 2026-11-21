@@ -1,12 +1,12 @@
 #!/bin/sh
 # bridge_apply_role <ap|sta>
 # 把整机刷成 UBNT airOS「Bridge 模式」等价行为：
-#   纯二层透明桥（无 NAT）+ 一条 5G WDS(4addr) 链路；DHCP 默认开 / IPv6 编译期关闭
+#   纯二层透明桥（无 NAT）+ 一条 5G WDS(4addr) 链路；固定 IP 192.168.1.241 / IPv6 关闭
 # 两端共用这一段，只差 mode 与管理 IP。开机由 99-zz-bridge-role 调用。
 . /lib/functions.sh
 
-BRIDGE_SSID='QSDK-BRIDGE'
-BRIDGE_KEY='bridge-500m-change-me'   # 首次刷完务必改（两端要一致）
+BRIDGE_SSID='WDS_AP'
+BRIDGE_KEY='WDS123456'              # 两端必须一致
 BRIDGE_CHAN='149'                    # 非 DFS，5.8G 合规段
 BRIDGE_DIST='550'                    # 500 m × 110%；按实际距离用 bridge-distance 改
 BRIDGE_TXPWR='20'                    # 原装天线保守值；改 14dBi 平板改 19
@@ -75,32 +75,51 @@ bridge_apply_role() {
     # 注意：QSDK swconfig 的端口/VLAN 映射在 VS010 上尚未实测，
     # 这里不擅自把 WAN 口并进桥（乱改会把机器搞成不通）。
     # WAN section 保留但不取地址、不做 NAT，等于闲置口。
-    if uci -q get network.wan >/dev/null; then
-        uci set network.wan.proto='none'
-        uci -q delete network.wan.ipaddr
-        uci -q delete network.wan.netmask
-        uci -q delete network.wan.gateway
-    fi
+    # 【有线修复】删 WAN / WAN6，关 VLAN，两个 CPU 口都进 br-lan（傻交换桥）
+    uci -q delete network.wan
+    uci -q delete network.wan6
+    uci -q delete dhcp.wan
+    uci -q delete dhcp.wan6
+    uci -q delete network.globals.ula_prefix
+    BR=$(uci -q get network.lan.device 2>/dev/null); [ -n "$BR" ] || BR='br-lan'
+    j=0
+    while uci -q get "network.@device[$j]" >/dev/null 2>&1; do
+        [ "$(uci -q get "network.@device[$j].name" 2>/dev/null)" = "$BR" ] && {
+            uci -q delete "network.@device[$j].ports"
+            uci -q add_list "network.@device[$j].ports"='eth0'
+            uci -q add_list "network.@device[$j].ports"='eth1'
+            break; }
+        j=$((j+1))
+    done
+    uci -q get network.@switch[0] >/dev/null 2>&1 && {
+        uci -q set network.@switch[0].enable_vlan='0'
+        uci -q set network.@switch[0].reset='1'; }
+    while [ -n "$(uci -q get network.@switch_vlan[0].vlan 2>/dev/null)" ]; do
+        uci -q delete network.@switch_vlan[0]
+    done
     uci set network.lan.type='bridge'
     uci set network.lan.stp='1'
     uci set network.lan.force_link='1'
     uci set network.lan.proto='static'
-    if [ "$role" = ap ]; then
-        uci set network.lan.ipaddr='192.168.1.2'
-    else
-        uci set network.lan.ipaddr='192.168.1.3'
-    fi
+    # 固定管理 IP（两台成对使用时，第二台刷完手动改成 192.168.1.242，避免 ARP 冲突）
+    uci set network.lan.ipaddr='192.168.1.241'
     uci set network.lan.netmask='255.255.255.0'
     uci -q delete network.lan.gateway
     uci -q delete network.lan.dns
 
-    # ── 4. 本版默认：DHCP 开；IPv6 编译期关闭，不配 RA/DHCPv6 ──
+    # ── 4. DHCP 默认开；IPv6 编译期已关闭，配置面全清空 ──
     #     两台同广播域会双 DHCP，在其中一台执行  bridge-dhcp off
     uci set dhcp.lan.ignore='0'
     uci -q set dhcp.lan.start='100'
     uci -q set dhcp.lan.limit='100'
     uci -q set dhcp.lan.leasetime='12h'
+    uci -q delete dhcp.lan.ra
+    uci -q delete dhcp.lan.dhcpv6
+    uci -q delete dhcp.lan.ndp
+    uci -q delete network.lan.ip6assign
+    uci -q delete network.lan.ipv6
     [ -x /etc/init.d/dnsmasq ] && { /etc/init.d/dnsmasq enable 2>/dev/null || true; /etc/init.d/dnsmasq restart 2>/dev/null || true; }
+    [ -x /etc/init.d/odhcpd ] && { /etc/init.d/odhcpd stop 2>/dev/null || true; /etc/init.d/odhcpd disable 2>/dev/null || true; }
 
     # ── 5. 防火墙全放行，不做 NAT ──
     if uci -q get firewall.@defaults[0] >/dev/null; then

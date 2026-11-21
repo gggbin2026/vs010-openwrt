@@ -1,14 +1,13 @@
 #!/bin/sh
-# bridge-ipv6 —— 本版 IPv6 已在编译期关闭，命令只作状态提示
-#   2026-11-21：QSDK 5.4 开启 CONFIG_IPV6 + ip6tables/nat6 会在首次开机
-#   约 30s 触发 qca-nss-ecm 的 BUG_ON（ARM e7f001f2）→ kernel panic →
-#   3 秒自动重启循环。为保稳定，IPv6 栈、odhcpd、ip6tables 全部不编入。
+# bridge-ipv6 —— 本版 IPv6 已在编译期关闭，运行时无法开启
+#   CONFIG_IPV6 / CONFIG_KERNEL_IPV6 / ip6tables / nat6 / conntrack6 / odhcpd
+#   全部未编入；wan6 接口已删除。需要 IPv6 必须改 .config 重新编译。
 case "$1" in
-    on)    echo "✗ 本版内核未编译 IPv6（CONFIG_IPV6 is not set），运行期无法开启";
-           echo "  需要 IPv6 请另开分支单独验证 ECM/NSS 组合，别在这套 WDS 桥上试";
-           exit 1;;
-    off)   echo "✓ 本版 IPv6 本就关闭（编译期），无需操作";;
-    status) echo "kernel IPv6: 编译期关闭 (CONFIG_IPV6 is not set)";
-            echo "odhcpd: 未编入  ip6tables: 未编入";;
-    *)     echo "用法: bridge-ipv6 {on|off|status}";;
+    status|'')
+        echo "IPv6: 编译期关闭（内核无 IPv6 栈）"
+        echo "wan6: $(uci -q get network.wan6.proto 2>/dev/null || echo 已删除)"
+        echo "ra=$(uci -q get dhcp.lan.ra 2>/dev/null || echo 未配置)  dhcpv6=$(uci -q get dhcp.lan.dhcpv6 2>/dev/null || echo 未配置)";;
+    on)  echo "✗ 本版 IPv6 在编译期关闭，无法运行时开启；请修改 .config 后重新编译";;
+    off) echo "✓ 本版 IPv6 本来就是关闭状态";;
+    *)   echo "用法: bridge-ipv6 {status|on|off}";;
 esac

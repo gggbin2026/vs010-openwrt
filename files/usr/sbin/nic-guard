@@ -4,6 +4,7 @@
 #     1) 不让你把「插线没反应」误判成砖
 #     2) 把 swconfig list / ip link / dmesg 真因打到串口，一眼定位
 #     3) br-lan 建不起来时，给现存 ethX 临时配 192.168.1.9/24，保证能 SSH 进去救
+#   4) 开机自愈：等 switch 注册 → 关 VLAN → eth0/eth1 都进 br-lan（修有线拿不到 DHCP）
 #   手动随时跑：  nic-guard
 LOG=/tmp/nic-guard.log
 
@@ -41,6 +42,29 @@ else
   [ -z "$SW" ] && echo "[nic-guard] !! ethX 在但 switch 未注册：先跑 swconfig list 看实际名字" > /dev/console
   [ -n "$SW" ] && [ "$SW" != "switch1" ] && \
     echo "[nic-guard] !! switch 名是 $SW 不是 switch1，02_network 要按实际名字改" > /dev/console
+fi
+
+
+# ── 开机自愈：补上 preinit 漏掉的那一拍 ──────────────────────────
+# 症状：无线能拿 DHCP、有线不能；swconfig list 有 switch1 但 VLAN 表没下发，
+# eth1 没 UP、eth0 是 wan/proto=none 不进桥。这里等驱动注册完成后重放。
+if ip link show br-lan >/dev/null 2>&1; then
+  SWX=$(swconfig list 2>/dev/null | sed -n 's/^Found: \(switch[0-9]*\).*/\1/p' | head -1)
+  if [ -n "$SWX" ]; then
+    swconfig dev "$SWX" set reset 1           2>/dev/null || true
+    swconfig dev "$SWX" set enable_vlan 0     2>/dev/null || true
+    swconfig dev "$SWX" set apply 1           2>/dev/null || true
+    echo "[nic-guard] 自愈: $SWX 关 VLAN（纯二层傻交换桥）" > /dev/console
+  fi
+  for e in eth0 eth1; do
+    [ -d "/sys/class/net/$e" ] || continue
+    ip link set "$e" up 2>/dev/null || true
+    if ! brctl show br-lan 2>/dev/null | grep -qw "$e"; then
+      brctl addif br-lan "$e" 2>/dev/null || true
+    fi
+    ip link set "$e" master br-lan 2>/dev/null || true
+  done
+  echo "[nic-guard] 自愈: eth0/eth1 已拉起并并入 br-lan，有线 DHCP 应可达" > /dev/console
 fi
 
 # 救急：br-lan 没建起来时给第一个 ethX 临时管理地址（不写 uci，重启即失效）
