@@ -44,6 +44,8 @@ env:
   SLIM_SH: slim.sh
   UPLOAD_FIRMWARE: true
   TZ: Asia/Shanghai
+  # 0 = 所有 Release 永久保留（≥5 次）；填 N 则只留最新 N 个，强制保底 5
+  KEEP_RELEASES: "0"
 
 jobs:
   build:
@@ -257,8 +259,56 @@ jobs:
         name: VS010_slim_WDS${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
         if-no-files-found: error
-        retention-days: 30
+        retention-days: 90
 
+    - name: Publish firmware to Releases (permanent, timestamped)
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      env:
+        GH_TOKEN: ${{ github.token }}
+        # KEEP_RELEASES 来自顶层 env，runner 会自动注入所有 step
+      run: |
+        set -euo pipefail
+        command -v gh >/dev/null 2>&1 || { echo "::error::runner 缺少 gh CLI"; exit 1; }
+        test -n "${FIRMWARE:-}" && test -n "$(ls -A "$FIRMWARE" 2>/dev/null)" \
+          || { echo "::error::没有待发布固件目录"; exit 1; }
+
+        # 按上海时间 + run_number 生成唯一 tag：每次重编都单独存档，互不覆盖
+        TAG="fw-$(date +'%Y%m%d-%H%M%S')-r${{ github.run_number }}"
+        {
+          echo "极简 WDS 网桥固件（5.4-QSDK / IPQ50xx）"
+          echo ""
+          echo "- 构建时间（上海）：$(date '+%Y-%m-%d %H:%M:%S %Z')"
+          echo "- Commit：${{ github.sha }}"
+          echo "- Run：#${{ github.run_number }} / attempt ${{ github.run_attempt }}"
+          echo "- 内容：上海时区 CST-8 / 全射频 CN / ethtool 1000M-Full / NAND 421 / MESH+DEBUGFS / UBNT 开机成桥 / IPv6 关闭"
+          echo "- 刷机：nand-factory.ubi；TTL 只接 TX/RX/GND，先备份 0:ART"
+        } > /tmp/relnotes.md
+
+        if gh release view "$TAG" >/dev/null 2>&1; then
+          echo "  tag 已存在（同秒重跑），改用 --clobber 覆盖附件"
+          gh release upload "$TAG" "$FIRMWARE"/* --clobber
+        else
+          gh release create "$TAG" "$FIRMWARE"/* \
+            --title "固件 $TAG" --notes-file /tmp/relnotes.md
+        fi
+        echo "  ✓ 已发布：https://github.com/${{ github.repository }}/releases/tag/$TAG"
+
+        # ── 可选清理：KEEP_RELEASES=0 → 全部永久保留（天然满足「最低 5 次」）
+        #    填 N>0 时只清理本 workflow 建的 fw-* 旧版，且强制保底 5 个 ──
+        KEEP="${KEEP_RELEASES:-0}"
+        case "$KEEP" in ''|*[!0-9]*) KEEP=0 ;; esac
+        if [ "$KEEP" -gt 0 ]; then
+          [ "$KEEP" -lt 5 ] && KEEP=5          # 硬保底：任何情况下至少留 5 次
+          TAGS=$(gh release list --limit 100 --json tagName --jq '.[].tagName' \
+                 | grep '^fw-' | sort -r || true)
+          i=0
+          for t in $TAGS; do
+            i=$((i+1))
+            [ "$i" -le "$KEEP" ] && continue
+            echo "  清理第 $i 个旧版：$t（保留最新 $KEEP 个）"
+            gh release delete "$t" --yes --cleanup-tag || true
+          done
+        fi
     - name: Upload build log
       if: always()
       uses: actions/upload-artifact@v4
